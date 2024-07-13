@@ -22,8 +22,8 @@ class Chempath():
         time_path (str): path of input model time
         f_min (float): minimum rate of pathways. Defaults to 0.0
         dtype (type): number type of numerical fields
-        species_of_interest (list): List of species of interest. These species
-            will not be considered as branching-point species.
+        ignored_sb (list): List of species ignored as branching-points. These
+            species will not be considered as branching-point species.
     '''
     def __init__(self, 
         reactions_path,
@@ -34,17 +34,30 @@ class Chempath():
         f_min=0, 
         warnings=True, 
         dtype=np.float128,
-        species_of_interest = []):
+        transport_species = False,
+        ignored_sb = []):
 
-        # ignore warnings
-        self.warnings = warnings
-        # minimum reate of pathways
+        # path of input reactions equations
+        self.reactions_path = reactions_path
+        # path of input reactions rates
+        self.rates_path = rates_path
+        # path of input species names
+        self.species_path = species_path
+        # path of input species concentrations
+        self.conc_path = conc_path
+        # path of input model time
+        self.time_path = time_path
+        # path of input model time
         self.f_min = f_min
+        # ignore_warnings
+        self.warnings = warnings
+        # number type of numerical fields
+        self.dtype = dtype
         # time 
         self.time = read_time_file(time_path, dtype=dtype)
         self.dt = self.time[1] - self.time[0]
         # model time
-        self.model_time = np.mean(self.time)
+        self.mean_time = np.mean(self.time)
         # species list
         self.species_list = read_species_file(species_path)
         # concentrations
@@ -82,14 +95,29 @@ class Chempath():
         self.di = self.di_del + np.dot(np.abs(np.multiply(self.mik, self.mik<0)), self.fk)
         # list of used banching species
         self.sb_list = []
-        self. species_of_interest = species_of_interest
-        # full list of species including transport species and full sij
-        transport_species = [f'{x}_transport' for x in self.species_list]
-        self.full_species_list = self.species_list + transport_species
-        self.full_sij = get_sij(self.full_species_list, self.reaction_equations)
-        # list of species not considered as branching species 
-        self.ignored_sb = deepcopy(species_of_interest)
+        self.ignored_sb = ignored_sb
+        # full list of species including transport species
+        self.transport_species = transport_species
+        if transport_species:
+            transport_species = [f'{x}_transport' for x in self.species_list]
+            self.full_species_list = self.species_list + transport_species
+            self.full_sij = get_sij(self.full_species_list, self.reaction_equations)
 
+
+    def reinit(self):
+        '''Re-initializes the chempath object with the input information'''
+        self.__init__(
+        reactions_path = self.reactions_path,
+        rates_path = self.rates_path,
+        species_path = self.species_path,
+        conc_path = self.conc_path,
+        time_path = self.time_path,
+        f_min = self.f_min,
+        warnings = self.warnings,
+        dtype = self.dtype,
+        transport_species = self.transport_species,
+        ignored_sb = self.ignored_sb
+        )
 
     def load_pathways_from_files(self, filespath, dtype=np.float128):
         '''Loads pathway info  saved using the save_pathway_info method
@@ -242,7 +270,7 @@ class Chempath():
             all_new_pathways.append(pid_n)
         return xjk_new, fk_new, new_pathway_ids
     
-    def find_new_pathways(self):
+    def form_new_pathways(self):
         '''Finds new pathways and appends their multiplicities and rates  to
         xjk and fk'''
         # for book keeping
@@ -337,7 +365,6 @@ class Chempath():
         fdel_destr = np.divide(np.multiply(self.fk[self.destr_idxs],
             self.pi_del[sb_idx]), Db)
  
-
          # update deleted pathway variables
         self.connection_del_pathways_rates = 0
         self.connection_del_pathways_rates1 = 0
@@ -605,9 +632,29 @@ class Chempath():
                 return False
         return True
     
-    def find_all_pathways(self, tau_max=None, timeout=60*40,
-            split_into_subpathways=True, verbose=False, exact_solutions=True):
-        
+    def find_new_pathways(self, sb):
+        '''Finds new pathways trough the branching-point species sb
+        Arguments:
+            sb (str): branching-points species
+        '''
+        self.get_prod_destr_idxs(sb)
+        self.form_new_pathways()
+        self.calculate_deleted_pathways_effect()
+        self.calculate_rates_explaining_conc_change()
+        self.delete_old_pathways()
+        self.delete_insignificant_pathways()
+        self.split_into_subpathways(exact_solutions=True)
+        self.check_rate_distribution()
+
+    def find_all_pathways(self, tau_max=None, timeout=0, verbose=False):
+        ''' Finds all pathways in the system
+        Arguments:
+            tau_max (float, optional): maximum lifetime of branching-point species
+            timeout (int): time in seconds to wait for the algorithm to finish. If
+                this is equal 0 there is no timeout.
+            verbose (bool): if True the book keeping variables are printed in
+                each iteration
+        '''
         def _handle_timeout(signum, frame):
             raise TimeoutError(os.strerror(errno.ETIME))
         
@@ -616,30 +663,14 @@ class Chempath():
         signal.signal(signal.SIGALRM, _handle_timeout)
         signal.alarm(timeout)
         try:
-            while sb:
-                # print('get_prod_destr_idxs')                
-                self.get_prod_destr_idxs(sb)
-                # print('find_new_pathways')
-                self.find_new_pathways()
-                # print('calculate_deleted_pathways_effect')
-                self.calculate_deleted_pathways_effect()
-                # print('calculate_rates_explaining_conc_change')
-                self.calculate_rates_explaining_conc_change()
-                # print('delete_old_pathways')
-                self.delete_old_pathways()
-                # print('delete_insignificant_pathways')
-                self.delete_insignificant_pathways()
-                if split_into_subpathways:
-                    # print('split_into_subpathways')
-                    self.split_into_subpathways(exact_solutions=exact_solutions)
+            while sb:              
+                self.find_new_pathways(sb)
                 if verbose:
                     print('########################')
                     print(sb) 
                     print('########################')
                     self.print_book_keeping_variables()
-                    print(self.get_pathways_explained_change())
                 sb = self.get_sb(tau_max=tau_max)
-            self.check_rate_distribution()
         except Exception as e:
             if type(e)==TimeoutError:
                 return 'timed out'
@@ -692,18 +723,17 @@ class Chempath():
         total_prod = np.multiply(self.mik[sp_idx, idxs], self.fk[idxs])*self.dt
         p_ids = self.pathway_ids[idxs]
         p_strs = [self.get_pathway_str(p, format=format) for p in pathways]
-        p_net_reacts = [self.get_net_reaction(p) for p in pathways]
         
         # make a pandas dataframe with the info
         contrib_dict = {'pathway_id': p_ids, 'pathway': p_strs,
             'contribution': contrib, 'rate':rates,
-            'net_reaction': p_net_reacts, 'total_prod': total_prod}
+            'total_prod': total_prod}
         contrib_df = pd.DataFrame(contrib_dict)
 
         deleted_contrib = pd. DataFrame({'pathway_id': ['del'], 
                 'pathway': ['deleted_pathways'],
                 'contribution': [deleted_pathways_prod/total_production], 
-                'rate':[self.di_del[sp_idx]],
+                'rate':[deleted_pathways_prod],
                 'total_prod': deleted_pathways_prod * self.dt})
 
         contrib_df = pd.concat([contrib_df, deleted_contrib])
@@ -806,24 +836,32 @@ class Chempath():
         Returns:
             net_reaction (str)
         '''
-        net = np.dot(self.full_sij, xjc).astype(int)
+        if not self.transport_species:
+            species_list = self.species_list
+            net = np.dot(self.sij, xjc).astype(int)
+        else:
+            species_list = self.full_species_list
+            net = np.dot(self.full_sij, xjc).astype(int)
         reactants_idxs = np.where(net<0)[0]
         products_idxs = np.where(net>0)[0]
 
         # delete hv and M from reactants
         reactants_idxs = [x for x in reactants_idxs
-            if self.full_species_list[x].upper() not in ['HV', 'M']]
+            if species_list[x].upper() not in ['HV', 'M']]
 
         to_int = lambda x: int(x) if x == int(x) else x
         to_str = lambda x: str(x) if x != 1 else ''
 
-        reactants = [to_str(to_int(-net[i])) + self.full_species_list[i]
+        reactants = [to_str(to_int(-net[i])) + species_list[i]
             for i in reactants_idxs]
 
-        products = [to_str(to_int(net[i])) + self.full_species_list[i]
+        products = [to_str(to_int(net[i])) + species_list[i]
             for i in products_idxs]
         
-        net_reaction = f'{" + ".join(reactants)} -> {" + ".join(products)}'
+        if products and reactants:
+            net_reaction = f'{" + ".join(reactants)} -> {" + ".join(products)}'
+        else:
+            net_reaction = 'Null'
         return net_reaction
     
     def save_pathway_info(self, path):
@@ -1027,15 +1065,13 @@ def get_latex_contribution_table(contribution_df, nrows=5, id_suffix=''):
         \end{longtable}
         '''
     )
-
-    toestr  = lambda x: '{:.3e}'.format(x)
     to_str = lambda x: str(round(x, 3))
     rows = ''
     for i in range(nrows):
         id_str = id_suffix + str(i+1)
         dfrow = contribution_df.loc[i]
         pathway = '\\begin{tabular}{@{}c@{}}' + dfrow.pathway + '\end{tabular}'
-        row =  f'{id_str} & {pathway} & {to_str(100 * dfrow.contribution)} & {toestr(dfrow.rate)}'
+        row =  f'{id_str} & {pathway} & {to_str(100 * dfrow.contribution)} & {to_str(dfrow.rate)}'
         rows += row + '\\\\' + '\n \\hline \n'
     return latex_table.substitute(rows=rows)
 
