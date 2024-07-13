@@ -1,4 +1,7 @@
 .DS_Store
+
+examples/box_model_pathways/chempath_input/*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

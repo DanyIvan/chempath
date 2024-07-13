@@ -1,0 +1,17 @@
+[
+{"reactants": ["O2", "hv"], "products": ["O", "O"], "rate_params": [1e-11], "type":"photo"},
+{"reactants": ["O2", "O"], "products": ["O3"], "rate_params": [6e-34, 3e-11, 2.4, 0], "type":"3body"},
+{"reactants": ["O3", "hv"], "products": ["O2", "O"], "rate_params": [1e-3], "type":"photo"},
+{"reactants": ["O3", "O"], "products": ["O2", "O2"], "rate_params": [8e-12, -2060], "type":"2body"},
+{"reactants": ["O3", "hv"], "products": ["O2", "O1D"], "rate_params": [2e-8], "type":"photo"},
+{"reactants": ["O2", "hv"], "products": ["O", "O1D"], "rate_params": [0.0], "type":"photo"},
+{"reactants": ["H2O", "O1D"], "products": ["OH", "OH"], "rate_params": [2.2E-10, 0], "type":"2body"},
+{"reactants": ["OH", "O3"], "products": ["HO2", "O2"], "rate_params": [1.6E-12, -940], "type":"2body"},
+{"reactants": ["HO2", "O3"], "products": ["OH", "O2", "O2"], "rate_params": [1.0E-14, -490], "type":"2body"},
+{"reactants": ["HO2", "O"], "products": ["OH", "O2"], "rate_params": [3.0E-11, 200], "type":"2body"},
+{"reactants": ["OH", "HO2"], "products": ["H2O", "O2"], "rate_params": [4.8E-11, 250], "type":"2body"},
+{"reactants": ["HO2", "HO2"], "products": ["H2O2", "O2"], "rate_params": [0.0], "type":"weird"},
+{"reactants": ["H2O2", "OH"], "products": ["HO2", "H2O"], "rate_params": [2.9E-12, -160], "type":"2body"},
+{"reactants": ["OH", "OH"], "products": ["H2O2"], "rate_params": [6.9e-31, 2.62e-11, 1.0, 0.0], "type":"3body"},
+{"reactants": ["H2O2", "O"], "products": ["OH", "HO2"], "rate_params": [1.4E-12, -2000], "type":"2body"}
+]

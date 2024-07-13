@@ -1,0 +1,11 @@
+[
+    {"species": "O2", "n": 3.83e+17},
+    {"species": "O3", "n": 1.3e10},
+    {"species": "O", "n": 1e4},
+    {"species": "O1D", "n": 2},
+    {"species": "H2O", "n": 1.85e13},
+    {"species": "OH", "n": 7.5e5},
+    {"species": "HO2", "n": 2e6},
+    {"species": "H2O2", "n": 2e6},
+    {"species": "hv", "n": 1}
+]
