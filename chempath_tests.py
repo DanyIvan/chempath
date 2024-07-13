@@ -2,18 +2,18 @@ import unittest
 import numpy as np
 from chempath import Chempath
 
-def get_chempath(input_folder, species_of_interest=[]):
+def get_chempath(input_folder, ignored_sb=[]):
     '''Gets a chempath object given an input folder and a list of species
     of interest'''
     chempath = Chempath(
         reactions_path=f'{input_folder}/reactions.txt',
         rates_path=f'{input_folder}/rates.dat',
         species_path=f'{input_folder}/species.txt',
-        conc_path=f'{input_folder}/num_den_change.dat',
+        conc_path=f'{input_folder}/concentrations.dat',
         time_path=f'{input_folder}/model_time.dat',
         f_min=0, 
         dtype=np.float128,
-        species_of_interest = species_of_interest
+        ignored_sb = ignored_sb
     )
     return chempath
 
@@ -21,7 +21,7 @@ def do_a_find_pathways_iteration(chempath, split_into_subpathways=False):
     '''Does a single iteration to find new pathways'''
     sb = chempath.get_sb()
     chempath.get_prod_destr_idxs(sb)
-    chempath.find_new_pathways()
+    chempath.form_new_pathways()
     chempath.calculate_deleted_pathways_effect()
     chempath.calculate_rates_explaining_conc_change()
     chempath.delete_old_pathways()
@@ -33,7 +33,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_get_sb(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
 
         # get first branching point
         sb = chempath.get_sb()
@@ -45,7 +45,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_simple_ozone_find_all_pathways(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
 
         chempath.find_all_pathways()
         
@@ -59,7 +59,7 @@ class Chempath_Tests(unittest.TestCase):
         
     def test_get_sij(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
 
         expected_sij = np.array([[-1.,  0.,  1., -1.],
                                 [ 1., -1., -1.,  2.],
@@ -68,7 +68,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_find_pathways_one_iteration(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
 
         do_a_find_pathways_iteration(chempath)
 
@@ -93,7 +93,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_is_simple_pathway(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
         xjk_test = np.array([[1., 1., 0., 0.],
                             [0., 0., 1., 1.],
                             [1., 0., 1., 0.],
@@ -105,7 +105,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_find_elementary_pathways(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
 
         do_a_find_pathways_iteration(chempath)
         do_a_find_pathways_iteration(chempath)
@@ -130,7 +130,7 @@ class Chempath_Tests(unittest.TestCase):
         
     def test_delete_pathways(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
         chempath.f_min = 0.2
 
         do_a_find_pathways_iteration(chempath)
@@ -142,7 +142,7 @@ class Chempath_Tests(unittest.TestCase):
         self.assertTrue(np.all(np.isclose(chempath.pi_del, expected_pi_del)))
         self.assertTrue(np.all(np.isclose(chempath.di_del, expected_di_del)))
 
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
         chempath.f_min = 10
         chempath.find_all_pathways()
 
@@ -163,7 +163,7 @@ class Chempath_Tests(unittest.TestCase):
 
     def test_simple_ozone_fmin_02(self):
         path='input/simple_ozone'
-        chempath = get_chempath(path, species_of_interest=['O2'])
+        chempath = get_chempath(path, ignored_sb=['O2'])
         chempath.f_min = 0.2
         chempath.find_all_pathways()
 
