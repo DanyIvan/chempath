@@ -13,9 +13,9 @@ python chempath_tests.py
 
 If there are no errors, you can go ahead and use Chempath.
 
-- See the [tutorial](file:tutorial.ipynb) jupyter-notebook to learn how to use Chempath.
-- See an [example](file:examples/box_model_pathways/box_model_pathways_example.ipynb) of how to use Chempath in a photochemical box model
-- See an [example](file:examples/photochem_modern_earth/pathways_in_photochem.ipynb) of how to use Chempath in a 1D photochemical model
+- See the [tutorial](tutorial.ipynb) jupyter-notebook to learn how to use Chempath.
+- See an [example](examples/box_model_pathways/box_model_pathways_example.ipynb) of how to use Chempath in a photochemical box model
+- See an [example](examples/photochem_modern_earth/pathways_in_photochem.ipynb) of how to use Chempath in a 1D photochemical model
 
 # References
 
