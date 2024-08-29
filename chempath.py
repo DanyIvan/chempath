@@ -8,8 +8,10 @@ from scipy import sparse
 from string import Template
 import errno
 import os
+import sys
 import signal
 import warnings 
+from joblib import Parallel, delayed
 
 class Chempath():
     '''
@@ -24,6 +26,9 @@ class Chempath():
         dtype (type): number type of numerical fields
         ignored_sb (list): List of species ignored as branching-points. These
             species will not be considered as branching-point species.
+        n_processes (int): Number of processes to use to construct pathways. If
+            n_processes > 1, pathways will be computed in parallel using
+            multiprocessing
     '''
     def __init__(self, 
         reactions_path,
@@ -35,7 +40,9 @@ class Chempath():
         warnings=True, 
         dtype=np.float128,
         transport_species = False,
-        ignored_sb = []):
+        ignored_sb = [],
+        n_processes = 1
+        ):
 
         # path of input reactions equations
         self.reactions_path = reactions_path
@@ -79,10 +86,11 @@ class Chempath():
         self.sij = get_sij(self.species_list, self.reaction_equations)
         # multiplicity of reaction j in pathway k
         self.xjk = np.diag(np.ones(len(self.reaction_equations), dtype=int))
+        self.xjk = sparse.csc_matrix(self.xjk)
         # list of pathways pathways by unique id
         self.pathway_ids = xjk_to_id_list(self.xjk)
         # molecules of species i produces or destroyed by pathway k
-        self.mik = np.dot(self.sij, self.xjk)
+        self.mik = sparse_dot(self.sij, self.xjk)
         # rates of pathways
         self.fk = self.rj
         # rate of production of species i by deleted pathways
@@ -96,8 +104,14 @@ class Chempath():
         # list of used banching species
         self.sb_list = []
         self.ignored_sb = ignored_sb
+        # number of processes to use to construct pathways
+        self.n_processes = n_processes
         # full list of species including transport species
         self.transport_species = transport_species
+        # temporary variables to store deleted pathway rates
+        self.rj_del_temp = np.zeros(len(self.reaction_equations), dtype=dtype)
+        self.pi_del_temp = np.zeros(len(self.species_list), dtype=dtype)
+        self.di_del_temp = np.zeros(len(self.species_list), dtype=dtype)
         if transport_species:
             transport_species = [f'{x}_transport' for x in self.species_list]
             self.full_species_list = self.species_list + transport_species
@@ -116,7 +130,8 @@ class Chempath():
         warnings = self.warnings,
         dtype = self.dtype,
         transport_species = self.transport_species,
-        ignored_sb = self.ignored_sb
+        ignored_sb = self.ignored_sb,
+        n_processes = self.n_processes
         )
 
     def load_pathways_from_files(self, filespath, dtype=np.float128):
@@ -128,11 +143,11 @@ class Chempath():
         # part of rate of reaction j deleted pathways
         self.rj_del = np.fromfile(f'{filespath}/rj_del.dat', dtype=dtype)
         # multiplicity of reaction j in pathway k
-        self.xjk = sparse.load_npz(f'{filespath}/sparse_xjk.npz').toarray()
+        self.xjk = sparse.load_npz(f'{filespath}/sparse_xjk.npz')
         # list of pathways pathways by unique id
         self.pathway_ids = xjk_to_id_list(self.xjk)
         # molecules of species i produces or destroyed by pathway k
-        self.mik = np.dot(self.sij, self.xjk)
+        self.mik = sparse_dot(self.sij, self.xjk)
         # rates of pathways
         self.fk = np.fromfile(f'{filespath}/fk.dat', dtype=dtype)
         # rate of production of species i by deleted pathways
@@ -151,12 +166,15 @@ class Chempath():
             dtype=str, delimiter=','))
 
         
-    def get_sb(self, tau_max=None):
+    def get_sb(self, tau_max=None, min_conc=None):
         ''' Gets the next branching-point species
         Arguments:
-            tau_max(float, Optional): maximum lifetime of branching point species. 
+            tau_max (float, Optional): maximum lifetime of branching point species. 
             Species with a lifetime higher than this will not be considered as 
             branching-point species.
+            min_conc (float, Optional): minimum concentration of branching point 
+            species.  Species with a concentration lower than this will not be 
+            considered as branching-point species.
         '''
         # calculate lifetime. If di=0 warning is raised and the species is not
         # choose as branching pont.
@@ -177,6 +195,10 @@ class Chempath():
         # filter out ignored species with lifetime>tau_max
         if tau_max:
             df = df[df.tau < tau_max]
+
+        # filter out species with concentration < min_conc
+        if min_conc:
+            df = df[df.mean_conc > min_conc]
 
         sb_list = df.species.to_list()
         
@@ -214,61 +236,84 @@ class Chempath():
 
     def recompute_pathway_dependent_variables(self):
         ''' Recomputes mik, pi and di '''
-        self.mik = np.dot(self.sij, self.xjk)
+        self.mik = sparse_dot(self.sij, self.xjk)
         posmik = get_positive_values(self.mik)
         negmik = get_negative_values(self.mik)
         self.pi = self.pi_del + np.dot(posmik, self.fk)
         self.di = self.di_del + np.dot(np.abs(negmik), self.fk)
         
-    def connect_pathways(self, mik, xjk):
+    def connect_pathways(self, idxs):
         '''Connects pathways producing and destroying Sb
         Arguments:
-            mik (numpy 2d array): matrix with the number molecules of species i 
-                produced or  destroyed by pathway k
-            xjk: (numpy 2d array): matrix with the multiplicity of reaction j 
-                in pathway k
+            idxs (tuple of arrays): indexes of the pathways producing and
+            destroying Sb. idxs = (prod_idxs, destr_idxs)
+        Returns tuple with:
+            xjk_new: list of new pathways multiplicities
+            fk_new: list of new pathways rates
+            pid_new: list of new pathways ids
+            fk_temp: array of already existing cumulative repeated pathways rates
+            rj_del_temp: array of reaction rates associated with deleted pathways
+            pi_del_temp: array of production of species by deleted pathways
+            di_del_temp: array of destruction of species by deleted pathways
         '''
         sb_idx = self.sb_idx
         Db = np.max([self.di[sb_idx], self.pi[sb_idx]])
         
-        # find all combinations of pathways producing and destroying sb
-        combinations = product(self.prod_idxs, self.destr_idxs)
+        # variables to store new pathways
+        xjk_new = []
+        fk_new = []
+        pid_new = []
+
+        # variables to store deleted pathway rates
+        rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.float128)
+        pi_del_temp = np.zeros(len(self.species_list), dtype=np.float128)
+        di_del_temp = np.zeros(len(self.species_list), dtype=np.float128)
+        fk_temp = np.zeros(len(self.fk), dtype=np.float128)
 
         # calculate new multiplicities so that sb is recycled
         # and calculate rates of new pathways
-        xjk_new = []
-        fk_new = []
-        new_pathway_ids = []
-        all_new_pathways = []
-
+        prod_idxs, destr_idxs = idxs
+        combinations = product(prod_idxs, destr_idxs)
         for p,d in combinations:
-            xjn = np.abs(mik[sb_idx, d]) * xjk[:,p] +\
-                mik[sb_idx, p] * xjk[:,d]
+            xjn = np.abs(self.mik[sb_idx, d]) * self.xjk[:,p] +\
+                self.mik[sb_idx, p] * self.xjk[:,d]
             # divide all multiplicities by greater common divisor
-            gcd = np.gcd.reduce(xjn.astype(int))
+            gcd = np.gcd.reduce(xjn.data.astype(int))
             xjn = xjn / gcd
+            xjn = xjn.astype(int)
 
             # calculate rates
             # rate has to be multiplied by gcd because pathways produce gcd
             # molecules of the species
             fn = np.multiply(gcd, np.divide(np.multiply(self.fk[p], self.fk[d]), Db))
+            
+            # of rate of pathway es lower than f_min, do not consider it and
+            # update deleted pathway variables
+            if fn < self.f_min:
+                mi_n = np.squeeze(sparse_dot(self.sij, xjn).T)
+                posmi_n = np.multiply(mi_n, mi_n>0)
+                negmi_n = np.multiply(mi_n, mi_n<0)
+                rj_del_temp = rj_del_temp + np.squeeze(xjn.toarray()) * fn
+                pi_del_temp = pi_del_temp + posmi_n * fn
+                di_del_temp = di_del_temp + np.abs(negmi_n) * fn
+                continue
 
             # if pathway already exists, do not repeat it, just add its rate:
             # the same pathway can be formed through different combination order
             # of same reactions 
             pid_n = get_pathway_id(xjn)
-            if (pid_n not in self.pathway_ids) and (pid_n not in all_new_pathways):
+            if pid_n in self.pathway_ids:
+                idx = np.where(self.pathway_ids == pid_n)[0]
+                fk_temp[idx] += fn
+            elif pid_n in pid_new:
+                idx = pid_new.index(pid_n)
+                fk_new[idx] += fn
+            else:
+                xjk_new.append(xjn)
                 fk_new.append(fn)
-                xjk_new.append(np.c_[xjn])
-                new_pathway_ids.append(pid_n)
-            elif pid_n in self.pathway_ids:
-                pid_idx = np.where(self.pathway_ids == pid_n)[0]
-                self.fk[pid_idx] = self.fk[pid_idx] + fn
-            elif pid_n in new_pathway_ids:
-                pid_idx = new_pathway_ids.index(pid_n)
-                fk_new[pid_idx] += fn            
-            all_new_pathways.append(pid_n)
-        return xjk_new, fk_new, new_pathway_ids
+                pid_new.append(pid_n)
+
+        return xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp, di_del_temp
     
     def form_new_pathways(self):
         '''Finds new pathways and appends their multiplicities and rates  to
@@ -277,26 +322,89 @@ class Chempath():
         self.old_pathways_total_rates = 0
         self.new_pathways_total_rates = 0
 
-        # connect pathways
-        xjk_new, fk_new, new_pathway_ids = self.connect_pathways(self.mik,
-                                                self.xjk)
-       
-        # include new pathways
-        if len(xjk_new) > 0:
-            xjk_new = np.hstack(xjk_new)
-
-            # append new pathways
-            self.xjk = np.concatenate([self.xjk, xjk_new], axis=1)
-            self.fk = np.concatenate([self.fk, fk_new])
-            self.pathway_ids = np.append(self.pathway_ids, new_pathway_ids)        
-
-            # for book keeping
-            idxs = np.concatenate([self.prod_idxs,self.destr_idxs])
-            self.old_pathways_total_rates =\
-                 math.fsum(np.dot(self.xjk[:,idxs], self.fk[idxs]))
-            self.new_pathways_total_rates = math.fsum(np.dot(xjk_new, fk_new))
+        new_pathways_flag = len(self.prod_idxs) > 0 and len(self.destr_idxs) > 0
+        if new_pathways_flag: 
             
-    
+            # if multiprocessing and number of new pathways > 1000, find new
+            # new pathways in parallel
+            nprod = len(self.prod_idxs)
+            ndestr = len(self.destr_idxs)
+            n_combinations = nprod * ndestr
+            if self.n_processes > 1 and n_combinations > 1000:
+                if nprod > ndestr:
+                    prod_idxs = np.array_split(self.prod_idxs, self.n_processes)
+                    destr_idxs = [self.destr_idxs] * self.n_processes
+                else:
+                    prod_idxs = [self.prod_idxs] * self.n_processes
+                    destr_idxs = np.array_split(self.destr_idxs, self.n_processes)
+                idxs = list(zip(prod_idxs, destr_idxs))
+                # find pathways in parallel
+                results = Parallel(n_jobs=self.n_processes)(
+                        delayed(self.connect_pathways)(i) for i in idxs)
+                # collect results from multiple jobs
+                xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp,\
+                    di_del_temp = zip(*results)
+                xjk_new = flatten_list(xjk_new)
+                fk_new = flatten_list(fk_new)
+                pid_new = flatten_list(pid_new)
+                fk_temp = np.sum(fk_temp, axis=0)
+                rj_del_temp = np.sum(rj_del_temp, axis=0)
+                pi_del_temp = np.sum(pi_del_temp, axis=0)
+                di_del_temp = np.sum(di_del_temp, axis=0)
+            else:
+                # find new pathways in a single process
+                xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp,\
+                    di_del_temp = self.connect_pathways((self.prod_idxs, self.destr_idxs))
+            
+            # update deleted pathway rates
+            self.rj_del_temp = rj_del_temp
+            self.pi_del_temp = pi_del_temp
+            self.di_del_temp = di_del_temp
+
+            # include new pathways
+            if len(xjk_new) > 0:
+                xjk_new = sparse.hstack(xjk_new)
+            
+                # append new pathways
+                self.xjk = sparse.hstack([self.xjk, xjk_new])
+                self.fk += fk_temp
+                self.fk = np.concatenate([self.fk, fk_new])
+                self.pathway_ids = np.append(self.pathway_ids, pid_new)   
+
+                # for book keeping
+                idxs = np.concatenate([self.prod_idxs,self.destr_idxs])
+                self.old_pathways_total_rates =\
+                    math.fsum(self.xjk[:,idxs].dot(self.fk[idxs]))
+                self.new_pathways_total_rates = math.fsum(xjk_new.dot(fk_new))
+            self.delete_duplicated_pathways()
+   
+    def delete_duplicated_pathways(self):
+        '''Deletes duplicated pathways'''
+        # find duplicated pathways
+        u, c = np.unique(self.pathway_ids, return_counts=True)
+        duplicates = u[c>1]
+
+        # if there are duplicates...
+        if len(duplicates) > 0:
+            # sum rates of duplicates pathways and keep just one instance
+            df = pd.DataFrame({'pid': self.pathway_ids, 'fk': self.fk,
+                'idx': np.arange(0, len(self.fk))})
+            df.fk = df.fk.astype('float128') 
+            df1 = df.groupby('pid').sum().reset_index()[['pid', 'fk']]
+            df2 = df[['pid', 'idx']].drop_duplicates(subset='pid', keep='first')
+            df = pd.merge(df1, df2, on='pid', how='inner')
+
+            idxs = df.idx.to_numpy()
+            pids = df.pid.to_numpy()
+            fk = df.fk.to_numpy().astype(np.float128)
+            
+            self.xjk = self.xjk[:, idxs]
+            self.pathway_ids = pids
+            self.fk = fk
+
+            self.recompute_pathway_dependent_variables()
+            self.get_prod_destr_idxs(self.sb_list[-1])
+
     def calculate_rates_explaining_conc_change(self):
         '''Calculate part of the pathway rates that contribute to the 
         concentration change of Sb
@@ -320,7 +428,7 @@ class Chempath():
 
             # for book keeping
             idxs = np.concatenate([self.prod_idxs,self.destr_idxs])
-            rates_explaining_sb = math.fsum(np.dot(self.xjk[:,idxs], self.fk[idxs]))
+            rates_explaining_sb = math.fsum(self.xjk[:,idxs].dot(self.fk[idxs]))
             self.rates_not_explaining_dc_sb =\
                 self.old_pathways_total_rates - rates_explaining_sb 
                 
@@ -342,10 +450,10 @@ class Chempath():
                 delete_idxs = np.concatenate([self.prod_idxs, self.destr_idxs])
             
             #for book keeping
-            self.deleted_rates = math.fsum(np.dot(self.xjk[:,delete_idxs],
+            self.deleted_rates = math.fsum(self.xjk[:,delete_idxs].dot(
                  self.fk[delete_idxs]))
 
-            self.xjk = np.delete(self.xjk, delete_idxs, axis=1)
+            self.xjk = delete_columns_sparse(self.xjk, delete_idxs)
             self.pathway_ids = np.delete(self.pathway_ids, delete_idxs)
             self.fk = np.delete(self.fk, delete_idxs)
             
@@ -376,10 +484,10 @@ class Chempath():
                 posmik = np.multiply(self.mik[:,p], self.mik[:,p]>0)
                 negmik =np.multiply(self.mik[:,p], self.mik[:,p]<0)
                 self.rj_del = self.rj_del +\
-                    np.multiply(self.xjk[:,p], fdel_prod[i])
+                    np.squeeze((self.xjk[:,p] * fdel_prod[i]).toarray())
                 self.connection_del_pathways_rates = math.fsum([
                     self.connection_del_pathways_rates,
-                    math.fsum(np.multiply(self.xjk[:,p], fdel_prod[i]))
+                    np.sum(np.multiply(self.xjk[:,p], fdel_prod[i]))
                 ])
                 self.pi_del = self.pi_del + posmik * fdel_prod[i]
                 self.di_del = self.di_del + np.abs(negmik) * fdel_prod[i]
@@ -388,10 +496,10 @@ class Chempath():
                 posmik = np.multiply(self.mik[:,d], self.mik[:,d]>0)
                 negmik =np.multiply(self.mik[:,d], self.mik[:,d]<0)
                 self.rj_del = self.rj_del +\
-                    np.multiply(self.xjk[:,d], fdel_destr[i])
+                    np.squeeze((self.xjk[:,d] * fdel_destr[i]).toarray())
                 self.connection_del_pathways_rates = math.fsum([
                     self.connection_del_pathways_rates,
-                    math.fsum(np.multiply(self.xjk[:,d], fdel_destr[i]))
+                    np.sum(np.multiply(self.xjk[:,d], fdel_destr[i]))
                 ])
                 self.pi_del = self.pi_del + posmik * fdel_destr[i]
                 self.di_del = self.di_del + np.abs(negmik) * fdel_destr[i]
@@ -413,20 +521,25 @@ class Chempath():
             for i in delete_idxs :
                 posmik = np.multiply(self.mik[:, i], self.mik[:,i]>0)
                 negmik =np.multiply(self.mik[:, i], self.mik[:, i]<0)
-                self.rj_del = self.rj_del + self.xjk[:,i] * self.fk[i]
+                self.rj_del = self.rj_del + np.squeeze(self.xjk[:,i].toarray()) * self.fk[i]
                 self.pi_del = self.pi_del + posmik * self.fk[i]
                 self.di_del = self.di_del + np.abs(negmik) * self.fk[i]
+            
+            # add deleted rates deleted during new pathway formation
+            self.rj_del += self.rj_del_temp
+            self.pi_del += self.pi_del_temp
+            self.di_del += self.di_del_temp
 
             self.fk = np.delete(self.fk, delete_idxs)
-            self.xjk = np.delete(self.xjk, delete_idxs, axis=1)
+            self.xjk = delete_columns_sparse(self.xjk, delete_idxs)
             self.pathway_ids = np.delete(self.pathway_ids, delete_idxs)
 
             # redefine stuff depending on pathways
             self.recompute_pathway_dependent_variables()
         
     def print_book_keeping_variables(self):
-        print(self.prod_idxs)
-        print(self.destr_idxs)
+        '''Prints variables useful to keep track of rates during the formation
+        of new pathways'''
         print('-----------------------')
         print(f'old pathways rates: {self.old_pathways_total_rates}')
         # new_pathways_rates = math.fsum([self.new_pathways_total_rates,
@@ -444,27 +557,38 @@ class Chempath():
         print(f'old rates - new rates: {old_minus_new}')
         print(f'old rates - delted rates: {new_minus_deleted}')
 
-        rates_pathways = np.dot(self.xjk, self.fk) + self.rj_del
+        rates_pathways = self.xjk.dot(self.fk) + self.rj_del
         print('------------------------------------')
         print(f'total reaction rates: {math.fsum(self.rj)}')
-        print(f'total pathways rates: {math.fsum(rates_pathways)}')
-        print(f'difference: {math.fsum(self.rj) - math.fsum(rates_pathways)}')
-        print(f'division: {math.fsum(self.rj)/math.fsum(rates_pathways)}')
+        print(f'total pathways rates: {np.sum(rates_pathways)}')
+        print(f'difference: {math.fsum(self.rj) - np.sum(rates_pathways)}')
+        print(f'division: {math.fsum(self.rj)/np.sum(rates_pathways)}')
 
 
-    def split_into_subpathways(self, exact_solutions=True):
-        '''Splits pathways into elementary subpathways
+    def split_into_subpathways(self, pathway_ids):
+        '''Finds the subpathways of the pathways within pathway_ids
         Arguments:
-            exact_solutions(bool, optional): if True, only exact solutions to
-            system of equations to split pathways are accepted
+            pathway_ids (list): ids of pathways to be splitted
+        Returns tuple with:
+            xjk_elem_list: list of new subpathways multiplicities
+            fk_elem_list: list of new subpathways rates 
+            delete_idxs: list of indexes of splitted pathways
+            fk_temp: array of cumulative rates of repeated pathways
         '''
         new_pathways_flag = len(self.prod_idxs) > 0 and len(self.destr_idxs) > 0
+
+        # variables to store subpathways
+        xjk_elem_list = []
+        fk_elem_list = []
+        pid_elem_list = []
+        delete_idxs = []
+        fk_temp = np.zeros(len(self.fk), dtype=np.float128)
+
         if new_pathways_flag:
-            delete_idxs = []
             # for each pathway...
-            for p_id in self.pathway_ids:
+            for p_id in pathway_ids:
                 p_index = np.where(self.pathway_ids == p_id)[0]
-                p = self.xjk[:, p_index]
+                p = self.xjk[:, p_index].T
                 f = self.fk[p_index]
 
                 # find elementary subpathways
@@ -475,45 +599,94 @@ class Chempath():
                     continue
                 
                 # solve system of equations ax = b 
+                p = np.squeeze(p.toarray())
                 a = xjk_elem
-                b = p.reshape(1, p.shape[0])[0]
+                b = p
                 x = solve_system_eq(a, b)
                 
                 # if solution is not exact, do nothing
-                if exact_solutions:
-                    if not np.all(np.isclose(np.dot(a,x), b)):
-                        # print(np.dot(a,x) - b)
-                        continue
+                if not np.all(np.isclose(np.dot(a,x), b)):
+                    # print(np.dot(a,x) - b)
+                    continue
                 
                 # distribute rate to subpathways
-                fk_sub = f * x
+                fk_elem = f * x
 
+                # append new subpathways
                 delete_idxs.append(p_index)
-
-                # look for subpathways in current pathways. Add rates if they already
-                # exists or add them to list otherwise
-                for i in range(xjk_elem.shape[1]):
-                    elem_pid = get_pathway_id(xjk_elem[:, i])
-                    if np.isin(elem_pid, self.pathway_ids):
-                        # print(f'Adding rate to existing pathway:{elem_pid}')
-                        idx = np.where(self.pathway_ids == elem_pid)[0][0]
-                        self.fk[idx] = self.fk[idx] + fk_sub[i]
+                for i in range(len(fk_elem)):
+                    pid_elem = get_pathway_id_dense(xjk_elem[:,i])
+                    # if subpathway already exists, just add its rate
+                    if pid_elem in self.pathway_ids:
+                        idx = np.where(self.pathway_ids == pid_elem)[0]
+                        fk_temp[idx] += fk_elem[i]
+                    elif pid_elem in pid_elem_list:
+                        idx = pid_elem_list.index(pid_elem)
+                        fk_elem_list[idx] += fk_elem[i]
                     else:
-                        # print(f'Adding new pathway:{elem_pid}')
-                        if elem_pid not in self.pathway_ids:
-                            self.xjk = np.concatenate(
-                                [self.xjk, np.c_[xjk_elem[:, i]]], axis=1)
-                            self.fk = np.concatenate([self.fk, [fk_sub[i]]])
-                            self.pathway_ids = np.append(
-                                self.pathway_ids, elem_pid)
-    
-            # Delete splitted pathways
-            self.xjk = np.delete(self.xjk, delete_idxs, axis=1)
+                        pid_elem_list.append(pid_elem)
+                        fk_elem_list.append(fk_elem[i])
+                        xjk_elem_list.append(np.c_[xjk_elem[:,i]])
+
+        return xjk_elem_list, fk_elem_list, delete_idxs, fk_temp
+        
+    def split_pathways(self):
+        '''Splits pathways into elementary subpathways
+        '''
+        # If multiprocessing and number of pathways > 1000, split pathways in 
+        # parallel
+        num_pathways = len(self.pathway_ids)
+        if self.n_processes > 1 and num_pathways > 1000:
+            # split pathways in parallel
+            results = Parallel(n_jobs=self.n_processes)(delayed(
+                    self.split_into_subpathways)(i) 
+                    for i in np.array_split(self.pathway_ids, self.n_processes))
+            # collect results form multiple jobs
+            if results:
+                xjk_elem, fk_elem, delete_idxs, fk_temp = zip(*results)
+
+                if len(xjk_elem) > 0:
+                    xjk_elem = [x for x in xjk_elem if len(x)>0]
+                    fk_elem = [x for x in fk_elem if len(x)>0]
+                    delete_idxs = [x for x in delete_idxs if len(x)>0]
+                    fk_temp = np.sum(fk_temp, axis=0)
+
+                    if len(xjk_elem) > 0:  
+                        xjk_elem = np.concatenate(xjk_elem)
+                        fk_elem = np.concatenate(fk_elem)
+                    if len(delete_idxs) > 0:
+                        delete_idxs = np.concatenate(delete_idxs)
+            else:
+                xjk_elem, fk_elem, delete_idxs = [], [], []
+        else:
+            # split pathways in a single process
+            xjk_elem, fk_elem, delete_idxs, fk_temp =\
+                self.split_into_subpathways(self.pathway_ids)
+        
+        # stack new subpathways
+        if len(xjk_elem) > 0: 
+            xjk_elem = np.hstack(xjk_elem)
+        # add rates from repeated subpathways
+        self.fk += fk_temp
+
+        # Delete splitted pathways
+        if len(delete_idxs) > 0:
+            self.xjk = delete_columns_sparse(self.xjk, delete_idxs)
             self.pathway_ids = np.delete(self.pathway_ids, delete_idxs)
             self.fk = np.delete(self.fk, delete_idxs)
-
-            # redefine stuff depending on pathways
-            self.recompute_pathway_dependent_variables()
+        
+        # append new subpathways
+        if len(xjk_elem) > 0:
+            xjk_elem = sparse.csc_matrix(xjk_elem)
+            pid_elem = xjk_to_id_list(xjk_elem)
+            
+            self.xjk = sparse.hstack([self.xjk, xjk_elem])
+            self.fk = np.concatenate([self.fk, fk_elem])
+            self.pathway_ids = np.concatenate([self.pathway_ids, pid_elem])  
+           
+        # delete repeated pathways
+        self.delete_duplicated_pathways()
+        self.recompute_pathway_dependent_variables()
             
     def find_elementary_pathways(self, xjc, pathway_index):
         ''' Finds the elementary pathways of a pathway
@@ -529,7 +702,7 @@ class Chempath():
             for sb in self.sb_list:
                 sb_idx = self.species_list.index(sb)
                 if self.mik[sb_idx, pathway_index] != 0:
-                    new_mik.append(np.abs(self.mik[sb_idx, pathway_index]))
+                    new_mik.append(np.abs(self.mik[sb_idx, pathway_index][0]))
                 # id dc_sb>0 add pseudo-reaction destroying sb
                 if self.mik[sb_idx, pathway_index] > 0:
                     new_reactions.append(f'{sb}=...')
@@ -538,13 +711,14 @@ class Chempath():
                     new_reactions.append(f'...={sb}')
             reactions = np.append(self.reaction_equations, new_reactions)
             sij = get_sij(self.species_list, reactions)
-            xjc = np.append(xjc, new_mik)
+            new_mik = sparse.csc_matrix(new_mik)
+            xjc = sparse.hstack([xjc, new_mik])
         else:
             sij = self.sij
             reactions = self.reaction_equations
 
         # find reactions in pathway
-        rxns = np.where(xjc != 0)[0]
+        rxns = xjc.nonzero()[1]
 
         # initialize subpathways
         xjk_sub = []
@@ -557,7 +731,7 @@ class Chempath():
         # init mik
         mik_sub = np.dot(sij, xjk_sub)
 
-        # fund subpathways
+        # found subpathways
         for sb in self.sb_list:
             xjk_sub_new = []
             sb_idx = self.species_list.index(sb)
@@ -581,6 +755,7 @@ class Chempath():
                 # divide all multiplicities by greater common divisor
                 gcd = np.gcd.reduce(xjn.astype(int))
                 xjn = xjn / gcd
+                xjn = xjn.astype(int)
                 
                 if self.is_elementary_pathway(xjk_sub, p, d):
                     xjk_sub_new.append(np.c_[xjn])
@@ -628,28 +803,37 @@ class Chempath():
         sb_idxs = [self.species_list.index(x) for x in sb_list]
 
         for idx in sb_idxs:
-            if np.dot(xjn.squeeze(), self.sij[idx,:]) != 0:
+            if xjn.dot(self.sij[idx,:]) != 0:
                 return False
         return True
     
-    def find_new_pathways(self, sb):
+    def find_new_pathways(self, sb, verbose=False, split_pathways=True):
         '''Finds new pathways trough the branching-point species sb
         Arguments:
             sb (str): branching-points species
         '''
         self.get_prod_destr_idxs(sb)
+        if verbose:
+            print('---------------------')
+            print(sb)
+            print(self.prod_idxs)
+            print(self.destr_idxs)
         self.form_new_pathways()
         self.calculate_deleted_pathways_effect()
         self.calculate_rates_explaining_conc_change()
         self.delete_old_pathways()
         self.delete_insignificant_pathways()
-        self.split_into_subpathways(exact_solutions=True)
+        if split_pathways:
+            self.split_pathways()
         self.check_rate_distribution()
+        if verbose:
+            self.print_book_keeping_variables()
 
-    def find_all_pathways(self, tau_max=None, timeout=0, verbose=False):
+    def find_all_pathways(self, tau_max=None, min_conc=None, timeout=0, verbose=False):
         ''' Finds all pathways in the system
         Arguments:
-            tau_max (float, optional): maximum lifetime of branching-point species
+            tau_max (float, optional): max lifetime of branching-point species
+            min_conc (float, optional): min concentration of branching-point species
             timeout (int): time in seconds to wait for the algorithm to finish. If
                 this is equal 0 there is no timeout.
             verbose (bool): if True the book keeping variables are printed in
@@ -658,19 +842,14 @@ class Chempath():
         def _handle_timeout(signum, frame):
             raise TimeoutError(os.strerror(errno.ETIME))
         
-        sb = self.get_sb(tau_max=tau_max)
+        sb = self.get_sb(tau_max=tau_max, min_conc=min_conc, )
 
         signal.signal(signal.SIGALRM, _handle_timeout)
         signal.alarm(timeout)
         try:
             while sb:              
-                self.find_new_pathways(sb)
-                if verbose:
-                    print('########################')
-                    print(sb) 
-                    print('########################')
-                    self.print_book_keeping_variables()
-                sb = self.get_sb(tau_max=tau_max)
+                self.find_new_pathways(sb, verbose=verbose)
+                sb = self.get_sb(tau_max=tau_max, min_conc=min_conc)
         except Exception as e:
             if type(e)==TimeoutError:
                 return 'timed out'
@@ -694,7 +873,7 @@ class Chempath():
         # calculate number of molecules of sp produced by each pathway
         sp_idx = self.species_list.index(sp)
         sp_mik = self.mik[sp_idx, :] 
-        Db = np.max([self.di[sp_idx], self.pi[sp_idx]])
+
         prod_idxs = np.where(sp_mik>0)[0]
         destr_idxs = np.where(sp_mik<0)[0]   
         # calculate rates of production or destruction of sp by specific pathways
@@ -708,14 +887,6 @@ class Chempath():
             idxs = prod_idxs
             deleted_pathways_prod = self.pi_del[sp_idx]
             total_production = self.pi[sp_idx]
-        # elif on == 'dc':
-        #     if self.dconc[sp_idx] > 0:
-        #         idxs = prod_idxs
-        #         deleted_pathways_prod = self.pi_del[sp_idx]
-        #     elif self.dconc[sp_idx] < 0:
-        #         idxs = destr_idxs
-        #         deleted_pathways_prod = self.di_del[sp_idx]
-        #     total_production = Db
 
         contrib = production[idxs] / total_production
         pathways = [self.xjk[:, i] for i in idxs]
@@ -751,7 +922,7 @@ class Chempath():
         rates. If not, raises a warning
         '''
         total_rates = math.fsum(self.rj)
-        total_pathway_rates = math.fsum(self.rj_del + np.dot(self.xjk, self.fk))
+        total_pathway_rates = np.sum(self.rj_del + self.xjk.dot(self.fk))
         rate_conservation = np.isclose(total_rates, total_pathway_rates)
         if not rate_conservation:
             warnings.warn('Rates are not correctly distributed!')
@@ -759,9 +930,9 @@ class Chempath():
     def get_pathways_explained_change(self):
         '''Gets dataframe with the fraction of concentration changes explained by
         pathways'''
-        rates_pathways = np.dot(self.xjk, self.fk)+ self.rj_del
+        rates_pathways = self.xjk.dot(self.fk)
         total_prod = np.dot(self.sij, rates_pathways)
-        explained_change = self.mean_dconc / total_prod
+        explained_change = total_prod / self.mean_dconc 
         explained_change = {k:[v] for k,v in zip(self.species_list, explained_change)}
         explained_change = pd.DataFrame(explained_change)
         return explained_change 
@@ -770,14 +941,14 @@ class Chempath():
         '''Gets dataframe with the fraction of concentration changes explained by
         deleted pathways'''
         total_prod = np.dot(self.sij, self.rj_del) * self.dt
-        explained_change = self.dconc / total_prod
+        explained_change = total_prod / self.dconc 
         explained_change = {k:[v] for k,v in zip(self.species_list, explained_change)}
         explained_change = pd.DataFrame(explained_change)
         return explained_change 
     
     def get_total_pathway_rates(self):
         '''Gets the total pathways rates'''
-        total_pathway_rates = math.fsum(self.rj_del + np.dot(self.xjk, self.fk))
+        total_pathway_rates = math.fsum(self.rj_del + self.xjk.dot(self.fk))
         return total_pathway_rates
     
     def get_pathway_str(self, xjc, format='txt', include_net_reaction=True):
@@ -792,8 +963,8 @@ class Chempath():
             pathway string (str)
         '''
         react_string = ''
-        idxs = np.where(xjc !=0)[0]
-        coeffs = xjc[idxs]
+        idxs = xjc.nonzero()[0]
+        coeffs = xjc.data
 
         if format == 'txt':
             format_react = format_react_txt
@@ -838,10 +1009,10 @@ class Chempath():
         '''
         if not self.transport_species:
             species_list = self.species_list
-            net = np.dot(self.sij, xjc).astype(int)
+            net = sparse_dot(self.sij, xjc).astype(int)
         else:
             species_list = self.full_species_list
-            net = np.dot(self.full_sij, xjc).astype(int)
+            net = sparse_dot(self.full_sij, xjc).astype(int)
         reactants_idxs = np.where(net<0)[0]
         products_idxs = np.where(net>0)[0]
 
@@ -869,8 +1040,7 @@ class Chempath():
         Arguments:
             path(str): path where the files will be saved
         '''
-        sparse_xjk = sparse.csr_matrix(self.xjk)
-        sparse.save_npz(f'{path}/sparse_xjk', sparse_xjk)
+        sparse.save_npz(f'{path}/sparse_xjk', self.xjk)
         self.fk.tofile(f'{path}/fk.dat')
         np.float128(self.pi).tofile(f'{path}/pi.dat')
         np.float128(self.di).tofile(f'{path}/di.dat')
@@ -984,15 +1154,31 @@ def get_sij(species_list, reactions):
                 sij[i][j] += n
     return sij
 
-def get_pathway_id(xjc):
-    ''' Gets the unique identifier of a pathway with multiplicities xjc
+def get_pathway_id_dense(xjc):
+    ''' Gets the unique identifier of a pathway with multiplicities xjc in 
+    a dense format
     Arguments:
         xjc (numpy array): multiplicities of pathway
     Returns:
         pathway_id (str)
     '''
-    rxns = np.where(xjc != 0)[0]
-    coeffs = [int(x) for x in xjc[rxns]]
+    xjc = np.squeeze(xjc.astype(int))
+    rxns = np.where(xjc !=0)[0]
+    coeffs = xjc[rxns]
+    pathway_id = ','.join([f'{x}*{y}' for x,y in zip(coeffs, rxns)])
+    return pathway_id
+
+def get_pathway_id(xjc):
+    ''' Gets the unique identifier of a pathway with multiplicities xjc in
+    a sparse format
+    Arguments:
+        xjc (numpy array): multiplicities of pathway
+    Returns:
+        pathway_id (str)
+    '''
+    xjc = xjc.astype(int)
+    rxns = xjc.nonzero()[0]
+    coeffs = xjc.data
     pathway_id = ','.join([f'{x}*{y}' for x,y in zip(coeffs, rxns)])
     return pathway_id
 
@@ -1002,6 +1188,28 @@ def xjk_to_id_list(xjk):
     for i in range(xjk.shape[1]):
         id_list.append(get_pathway_id(xjk[:, i]))
     return np.array(id_list)
+
+# def delete_duplicated_pathways(pathway_ids,fk, xjk):
+#     '''Deletes duplicated pathways'''
+#     u, c = np.unique(pathway_ids, return_counts=True)
+#     duplicates = u[c>1]
+#     if len(duplicates) > 0:
+#         df = pd.DataFrame({'pid': pathway_ids, 'fk': fk,
+#             'idx': np.arange(0, len(fk))})
+#         df.fk = df.fk.astype('float128') 
+#         df1 = df.groupby('pid').sum().reset_index()[['pid', 'fk']]
+#         df2 = df[['pid', 'idx']].drop_duplicates(subset='pid', keep='first')
+#         df = pd.merge(df1, df2, on='pid', how='inner')
+
+#         idxs = df.idx.to_numpy()
+#         pids = df.pid.to_numpy()
+#         fk = df.fk.to_numpy().astype(np.float128)
+        
+#         xjk = xjk[:, idxs]
+#         pathway_ids = pids
+#         fk = fk
+#     return pathway_ids, fk, xjk
+
 
 def format_react_txt(reacts, prods):
     '''Gets a reaction string in a txt format
@@ -1044,6 +1252,22 @@ def get_negative_values(mik):
     '''Gets mik where mik<0'''
     negmik = np.multiply(mik, mik<0)
     return negmik
+
+def sparse_dot(A, xjk):
+    '''Perform dot product of A and xjk'''
+    return xjk.T.dot(A.T).T
+
+def delete_columns_sparse(xjk, delete_idxs):
+    '''Delete columns in delete_idxs from sparse matrix xjk'''
+    idxs = np.arange(0, xjk.shape[1])
+    keep_idxs = np.setdiff1d(idxs, delete_idxs)
+    return xjk[:, keep_idxs]
+
+def flatten_list(x):
+    flat = []
+    for elem in x:
+        flat += elem
+    return flat
 
 def get_latex_contribution_table(contribution_df, nrows=5, id_suffix=''):
     '''Cobverts a contribution dataframe to a latex table string
