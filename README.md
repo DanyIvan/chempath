@@ -1,6 +1,11 @@
 # Chempath
 
-![chempath](figures/chemnpath.pdf)
+
+<p align="center">
+  <img src="figures/chemnpath.pdf">
+</p>
+
+
 
 Chempath is a pathway analysis program that automatically builds the the most important pathways of a reaction system. This algorithm was originally developed by Lehmann (2004). Chempath is an open-source, python implementation of this algorithm
 
