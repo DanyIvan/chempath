@@ -2,7 +2,7 @@
 
 
 <p align="center">
-  <img src="figures/chemnpath.pdf">
+  <img src="figures/chempath.png">
 </p>
 
 
