@@ -17,17 +17,6 @@ def get_chempath(input_folder, ignored_sb=[]):
     )
     return chempath
 
-def do_a_find_pathways_iteration(chempath, split_into_subpathways=False):
-    '''Does a single iteration to find new pathways'''
-    sb = chempath.get_sb()
-    chempath.get_prod_destr_idxs(sb)
-    chempath.form_new_pathways()
-    chempath.calculate_deleted_pathways_effect()
-    chempath.calculate_rates_explaining_conc_change()
-    chempath.delete_old_pathways()
-    chempath.delete_insignificant_pathways()
-    if split_into_subpathways:
-        chempath.split_into_subpathways()
 
 class Chempath_Tests(unittest.TestCase):
 
@@ -54,7 +43,7 @@ class Chempath_Tests(unittest.TestCase):
                                 [1., 2., 1.],
                                 [0., 0., 1.]])
         expected_fk = np.array([80.,  9.,  1.])
-        self.assertTrue(np.all(chempath.xjk == expected_xjk))
+        self.assertTrue(np.all(chempath.xjk.toarray() == expected_xjk))
         self.assertTrue(np.all(np.isclose(chempath.fk, expected_fk)))
         
     def test_get_sij(self):
@@ -70,7 +59,8 @@ class Chempath_Tests(unittest.TestCase):
         path='input/simple_ozone'
         chempath = get_chempath(path, ignored_sb=['O2'])
 
-        do_a_find_pathways_iteration(chempath)
+        sb = chempath.get_sb()
+        chempath.find_new_pathways(sb)
 
         expected_xjk = np.array([[1., 1., 0., 0.],
                                 [0., 0., 1., 1.],
@@ -84,7 +74,7 @@ class Chempath_Tests(unittest.TestCase):
                                 [ 0.,  0.,  0.,  0.]])
         expected_pi = np.array([19.8,  2.7,  0. ])
         expected_di = np.array([ 1.8, 29.7,  0. ])
-        self.assertTrue(np.all(np.isclose(chempath.xjk, expected_xjk)))
+        self.assertTrue(np.all(np.isclose(chempath.xjk.toarray(), expected_xjk)))
         self.assertTrue(np.all(np.isclose(chempath.fk, expected_fk)))
         self.assertTrue(np.all(chempath.pathway_ids == expected_pids))
         self.assertTrue(np.all(np.isclose(chempath.mik, expected_mik)))
@@ -107,8 +97,11 @@ class Chempath_Tests(unittest.TestCase):
         path='input/simple_ozone'
         chempath = get_chempath(path, ignored_sb=['O2'])
 
-        do_a_find_pathways_iteration(chempath)
-        do_a_find_pathways_iteration(chempath)
+        sb = chempath.get_sb()
+        chempath.find_new_pathways(sb, split_pathways=False)
+
+        sb = chempath.get_sb()
+        chempath.find_new_pathways(sb, split_pathways=False)
 
         expected_el_pathways1 = np.array([[1., 0.],
                                         [0., 1.],
@@ -118,13 +111,14 @@ class Chempath_Tests(unittest.TestCase):
                                         [1.],
                                         [1.],
                                         [1.]])
+        
         self.assertTrue(np.all(
             chempath.find_elementary_pathways(
-                chempath.xjk[:,2], 2) == expected_el_pathways1)
+                chempath.xjk[:,2].T, 2) == expected_el_pathways1)
             )
         self.assertTrue(np.all(
             chempath.find_elementary_pathways(
-                chempath.xjk[:,3], 3) == expected_el_pathways2)
+                chempath.xjk[:,3].T, 3) == expected_el_pathways2)
             )
          
         
@@ -133,7 +127,8 @@ class Chempath_Tests(unittest.TestCase):
         chempath = get_chempath(path, ignored_sb=['O2'])
         chempath.f_min = 0.2
 
-        do_a_find_pathways_iteration(chempath)
+        sb = chempath.get_sb()
+        chempath.find_new_pathways(sb)
 
         expected_rj_del = np.array([0. , 0.1, 0. , 0.2])
         expected_di_del = np.array([0.2, 0. , 0. ])
@@ -155,7 +150,7 @@ class Chempath_Tests(unittest.TestCase):
         expected_pi_del = np.array([19.8,  2.7,  0. ])
         expected_di_del = np.array([ 1.8, 29.7,  0. ])
 
-        self.assertTrue(np.all(np.isclose(chempath.xjk, expected_xjk)))
+        self.assertTrue(np.all(np.isclose(chempath.xjk.toarray(), expected_xjk)))
         self.assertTrue(np.all(np.isclose(chempath.fk, expected_fk)))
         self.assertTrue(np.all(np.isclose(chempath.rj_del, expected_rj_del)))
         self.assertTrue(np.all(np.isclose(chempath.pi_del, expected_pi_del)))
@@ -176,7 +171,7 @@ class Chempath_Tests(unittest.TestCase):
         expected_pi_del = np.array([0.2, 0.3, 0. ])
         expected_di_del = np.array([0.2, 0.3, 0. ])
 
-        self.assertTrue(np.all(np.isclose(chempath.xjk, expected_xjk)))
+        self.assertTrue(np.all(np.isclose(chempath.xjk.toarray(), expected_xjk)))
         self.assertTrue(np.all(np.isclose(chempath.fk, expected_fk)))
         self.assertTrue(np.all(np.isclose(chempath.rj_del, expected_rj_del)))
         self.assertTrue(np.all(np.isclose(chempath.pi_del, expected_pi_del)))
