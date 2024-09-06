@@ -12,7 +12,22 @@ Chempath is a pathway analysis program that automatically builds the the most im
 
 ## How to use Chempath
 
-Clone this repository with and go to the repository main directory. Try running the tests:
+Clone this repository with and go to the repository main directory.
+
+Create a conda environment with the packages necessary to run chempath:
+
+```
+conda create --name chempath python=3.10
+```
+
+Activate the environment and install the required packages with:
+
+```
+conda activate chempath
+pip install -r requirements.txt
+```
+
+Try running the tests:
 
 ```python
 python chempath_tests.py

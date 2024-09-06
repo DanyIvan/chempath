@@ -72,7 +72,7 @@ class Chempath():
         # concentratio change
         self.dconc = self.conc[1] - self.conc[0]
         # mean concentration
-        self.mean_conc = np.trapz(self.conc,self.time, axis=0) / self.dt
+        self.mean_conc = np.trapezoid(self.conc,self.time, axis=0) / self.dt
         # mean rate of concentration change
         self.mean_dconc = np.array(self.dconc) / self.dt 
         # reactions and rates
