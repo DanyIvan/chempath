@@ -33,6 +33,13 @@ Try running the tests:
 python chempath_tests.py
 ```
 
+You can use this conda environment within a jupyter notebook with:
+
+```
+conda install -c anaconda ipykernel
+python -m ipykernel install --user --name=chempath
+```
+
 If there are no errors, you can go ahead and use Chempath.
 
 - See the [tutorial](tutorial.ipynb) jupyter-notebook to learn how to use Chempath.
