@@ -12,6 +12,7 @@ import sys
 import signal
 import warnings 
 from joblib import Parallel, delayed
+from functools import partial
 
 class Chempath():
     '''
@@ -389,18 +390,13 @@ class Chempath():
             # sum rates of duplicates pathways and keep just one instance
             df = pd.DataFrame({'pid': self.pathway_ids, 'fk': self.fk,
                 'idx': np.arange(0, len(self.fk))})
-            df.fk = df.fk.astype('float128') 
-            df1 = df.groupby('pid').sum().reset_index()[['pid', 'fk']]
-            df2 = df[['pid', 'idx']].drop_duplicates(subset='pid', keep='first')
-            df = pd.merge(df1, df2, on='pid', how='inner')
+            groups = df.groupby('pid').groups
+            group_idxs = list(groups.values())
+            new_idxs = [x[0] for x in group_idxs]
 
-            idxs = df.idx.to_numpy()
-            pids = df.pid.to_numpy()
-            fk = df.fk.to_numpy().astype(np.float128)
-            
-            self.xjk = self.xjk[:, idxs]
-            self.pathway_ids = pids
-            self.fk = fk
+            self.xjk = self.xjk[:, new_idxs]
+            self.pathway_ids = self.pathway_ids[new_idxs]
+            self.fk = np.array([np.sum(self.fk[idx]) for idx in group_idxs])
 
             self.recompute_pathway_dependent_variables()
             self.get_prod_destr_idxs(self.sb_list[-1])
@@ -565,7 +561,7 @@ class Chempath():
         print(f'division: {math.fsum(self.rj)/np.sum(rates_pathways)}')
 
 
-    def split_into_subpathways(self, pathway_ids):
+    def split_into_subpathways(self, pathway_ids, method='lsq_linear'):
         '''Finds the subpathways of the pathways within pathway_ids
         Arguments:
             pathway_ids (list): ids of pathways to be splitted
@@ -598,12 +594,65 @@ class Chempath():
                 if xjk_elem.shape[1] == 1:
                     continue
                 
-                # solve system of equations ax = b 
                 p = np.squeeze(p.toarray())
                 a = xjk_elem
                 b = p
-                x = solve_system_eq(a, b)
-                
+
+                if method == 'lsq_linear':
+                    # solve system of equations ax = b 
+                    x = solve_system_eq(a, b)
+                elif method == 'lehmann':
+                    # get elementary pathways ids
+                    pid_elem = np.array([get_pathway_id_dense(xjk_elem[:, i])
+                        for i in range(xjk_elem.shape[1])])
+                    # get number of elementary pathways
+                    num_elem = len(pid_elem)
+                    # check if elementary  pathways already exists
+                    is_old_pathway = [False] * num_elem
+
+                    # get rates of already existing pathways, and set the rate
+                    # equals zero if the pathway does not exists
+                    rates = np.zeros(num_elem)
+                    for i, pid in enumerate(pid_elem):
+                        if pid in  self.pathway_ids:
+                            idx = np.where(self.pathway_ids == pid)[0][0]
+                            rates[i] = self.fk[idx]
+                            is_old_pathway[i] = True
+                        else:
+                            is_old_pathway[i] = False
+
+                    # rank subpathways by their rate. Higher rate = lower rank
+                    order1 = rates.argsort()[::-1]
+                    rank1 = order1.argsort()
+                    num_old_pathways = len(np.where(is_old_pathway)[0])
+
+                    # if rate = 0, rank subpathways by the sum of their
+                    # multiplicities
+                    order2 = np.argsort(xjk_elem.sum(axis=0))
+                    rank2 = order2.argsort()
+
+                    # if two pathways have the same rate, rank them by their
+                    # simplicity
+                    u,c = np.unique(rates, return_counts=1)
+                    repeated_rates = u[c>1]   
+                    for rate in repeated_rates:
+                        idxs = np.where(rates == rate)[0]
+                        rank1_ = rank1[idxs]
+                        rank2_ = rank2[idxs]
+                        rank2_ = rank2_.argsort().argsort()
+                        new_rank = min(rank1_) + rank2_
+                        rank1[idxs] = new_rank    
+
+                    # combine the two ranks
+                    rank2 = rank2 + num_old_pathways
+                    rank =  np.array([rank1[i] if is_old_pathway[i] else 
+                        rank2[i] for i in range(num_elem)])
+                    
+                    # minimize the function  rank**2 dot x, subject to the
+                    # constraint ax = b
+                    x = solve_system_eq_rank(a, b, rank)   
+                else:
+                    raise Exception('method must be one of lsq_linear, lehmann')
                 # if solution is not exact, do nothing
                 if not np.all(np.isclose(np.dot(a,x), b)):
                     # print(np.dot(a,x) - b)
@@ -630,7 +679,7 @@ class Chempath():
 
         return xjk_elem_list, fk_elem_list, delete_idxs, fk_temp
         
-    def split_pathways(self):
+    def split_pathways(self, method='lsq_linear'):
         '''Splits pathways into elementary subpathways
         '''
         # If multiprocessing and number of pathways > 1000, split pathways in 
@@ -639,7 +688,7 @@ class Chempath():
         if self.n_processes > 1 and num_pathways > 1000:
             # split pathways in parallel
             results = Parallel(n_jobs=self.n_processes)(delayed(
-                    self.split_into_subpathways)(i) 
+                    partial(self.split_into_subpathways, method=method))(i) 
                     for i in np.array_split(self.pathway_ids, self.n_processes))
             # collect results form multiple jobs
             if results:
@@ -661,7 +710,7 @@ class Chempath():
         else:
             # split pathways in a single process
             xjk_elem, fk_elem, delete_idxs, fk_temp =\
-                self.split_into_subpathways(self.pathway_ids)
+                self.split_into_subpathways(self.pathway_ids, method=method)
         
         # stack new subpathways
         if len(xjk_elem) > 0: 
@@ -807,7 +856,7 @@ class Chempath():
                 return False
         return True
     
-    def find_new_pathways(self, sb, verbose=False, split_pathways=True):
+    def find_new_pathways(self, sb, verbose=False, split_pathways=True, method='lsq_linear'):
         '''Finds new pathways trough the branching-point species sb
         Arguments:
             sb (str): branching-points species
@@ -824,12 +873,13 @@ class Chempath():
         self.delete_old_pathways()
         self.delete_insignificant_pathways()
         if split_pathways:
-            self.split_pathways()
+            self.split_pathways(method=method)
         self.check_rate_distribution()
         if verbose:
             self.print_book_keeping_variables()
 
-    def find_all_pathways(self, tau_max=None, min_conc=None, timeout=0, verbose=False):
+    def find_all_pathways(self, tau_max=None, min_conc=None, timeout=0, 
+            verbose=False, method='lsq_linear'):
         ''' Finds all pathways in the system
         Arguments:
             tau_max (float, optional): max lifetime of branching-point species
@@ -848,7 +898,7 @@ class Chempath():
         signal.alarm(timeout)
         try:
             while sb:              
-                self.find_new_pathways(sb, verbose=verbose)
+                self.find_new_pathways(sb, verbose=verbose, method=method)
                 sb = self.get_sb(tau_max=tau_max, min_conc=min_conc)
         except Exception as e:
             if type(e)==TimeoutError:
@@ -1120,10 +1170,9 @@ def solve_system_eq(a,b):
     x = sol.x
     return x
 
-# def solve_system_eq1(a,b):
-#     rank = np.argsort(a.sum(axis=0))**2
-#     sol = linprog(rank, A_eq = a, b_eq = b)
-#     return sol.x
+def solve_system_eq_rank(a,b, rank):
+    sol = linprog(rank**2, A_eq = a, b_eq = b)
+    return sol.x
 
 def get_sij(species_list, reactions):
     '''Gets number of molecules/cm^3 or ppb of species i produced by reaction j
