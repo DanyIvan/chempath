@@ -47,6 +47,15 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
                     settings_file,\
                     star_file,\
                     atmosphere_file)
+    
+    initial_conditions = pc.wrk.usol
+    pc.initialize_stepper(initial_conditions)
+    while True:
+        tn = pc.step()
+        print('Current time in integration: %e s'%tn,end='\r')
+        converged = pc.check_for_convergence()
+        if converged:
+            break
 
     # decrease O2 flux
     pc.set_lower_bc('O2',bc_type='flux',flux=o2_flux)
@@ -56,10 +65,11 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     r1,r2 = get_reactants_idxs(pc.dat.species_names, reactions) 
 
     num_densities = []
+    mixing_ratios = []
     reaction_rates = []
     rainout_rates = []
     time = []
-    
+
     # run model until time tf
     pc.var.atol = 1e-21
     pc.initialize_stepper(pc.wrk.usol)
@@ -69,6 +79,7 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
         if tn > t_save:
             # save number densities
             num_densities.append(pc.wrk.densities.astype(np.float128))
+            mixing_ratios.append(pc.wrk.densities / pc.wrk.density)
             densities = np.vstack([pc.wrk.densities, pc.wrk.densities[-1]])
             # calculate and save reaction rates
             rates = np.multiply(pc.wrk.rx_rates.T, densities[r1,:])
@@ -81,6 +92,7 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     pc.destroy_stepper()
 
     num_densities = np.array(num_densities)
+    mixing_ratios = np.array(mixing_ratios)
     # get rif of HV and M
     num_densities = num_densities[:, :-1, :]
     reaction_rates = np.array(reaction_rates)
@@ -90,6 +102,7 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     # save model output to files
     pathlib.Path(output_path).mkdir(exist_ok=True, parents=True)
     num_densities.tofile(f'{output_path}/num_densities.dat')
+    mixing_ratios.tofile(f'{output_path}/mixing_ratios.dat')
     np.savetxt(f'{output_path}/num_densities.shape', num_densities.shape)
     reaction_rates.tofile(f'{output_path}/reaction_rates.dat')
     np.savetxt(f'{output_path}/reaction_rates.shape', reaction_rates.shape)
@@ -104,7 +117,8 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     
 def save_number_densities(path):
     # species to save data for
-    species = ['O2', 'O3', 'CH4', 'CO', 'H2', 'OH', 'HO2', 'O', 'NO','NO2']
+    species = ['O2', 'O3', 'CH4', 'CO', 'H2', 'OH', 'HO2', 'O', 'NO','NO2', 
+        'CH3O2']
     # read species file
     ispec = np.loadtxt(f'{path}/species.txt', dtype=str, delimiter=',')
 
