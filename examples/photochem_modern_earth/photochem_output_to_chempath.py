@@ -80,7 +80,7 @@ def photochem_to_cehmpath(output_path, layer=None):
             
             # get dt
             dt = times[i+1] - times[i]
-    
+
             # get conc change
             num_den_change = num_densities_alt[i+1] - num_densities_alt[i]
 
