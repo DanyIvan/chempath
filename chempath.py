@@ -104,6 +104,7 @@ class Chempath():
         self.di = self.di_del + np.dot(np.abs(np.multiply(self.mik, self.mik<0)), self.fk)
         # list of used banching species
         self.sb_list = []
+        self.sb_order = {}
         self.ignored_sb = ignored_sb
         # number of processes to use to construct pathways
         self.n_processes = n_processes
@@ -204,8 +205,11 @@ class Chempath():
         sb_list = df.species.to_list()
         
         if len(sb_list) > 0:
-            self.sb_list.append(sb_list[0])
-            return sb_list[0]
+            next_sb = sb_list[0]
+            next_sb_idx = self.species_list.index(next_sb)
+            self.sb_list.append(next_sb)
+            self.sb_order[next_sb_idx] = len(self.sb_list) - 1
+            return next_sb
         return None
 
     def delete_zero_reactions(self):
@@ -565,6 +569,8 @@ class Chempath():
         '''Finds the subpathways of the pathways within pathway_ids
         Arguments:
             pathway_ids (list): ids of pathways to be splitted
+            method (str): one of 'lsq_linear' or 'lehmann'. This option
+            determines the method to use to split pathways into subpathways
         Returns tuple with:
             xjk_elem_list: list of new subpathways multiplicities
             fk_elem_list: list of new subpathways rates 
@@ -892,6 +898,7 @@ class Chempath():
         def _handle_timeout(signum, frame):
             raise TimeoutError(os.strerror(errno.ETIME))
         
+        self.check_mass_conservation()
         sb = self.get_sb(tau_max=tau_max, min_conc=min_conc, )
 
         signal.signal(signal.SIGALRM, _handle_timeout)
@@ -962,10 +969,41 @@ class Chempath():
         contrib_df.sort_values('contribution', ascending=False, inplace=True)
         contrib_df = contrib_df.reset_index(drop=True)
         return contrib_df        
-   
-    def check_mass_conservation(self):
-        prod = np.dot(self.sij, self.rj) * self.dt
-        return self.dconc/(prod+1e-100)
+       
+    def check_mass_conservation(self, min_concentration=1.0, atol=1e-3,
+            rtol=1e-3):
+        '''
+        Checks that concentration changes are balanced by the reactions
+        Arguments:
+            min_concentration (flaot): minimum concentration consiudered as 
+                important. Defaults to 1 molec/cm^3. Species with concentration
+                changes lower that this will use rtol to check the balance, and
+                other species will use atol.
+            atol (flat): absoloute tolerance
+            rtol (float): relative tolerance
+        '''
+        # find species with concentration changes greater that min
+        dconc_gt = np.where(np.abs(self.dconc) > min_concentration)[0]
+        # find species with concentration changes lower that min
+        dconc_lt = np.where(np.abs(self.dconc) < min_concentration)[0]
+
+        # calculate production - destruction
+        chemprod = np.dot(self.sij, self.rj) * self.dt
+
+        # check balance and diplay warning if unbalanced
+        for i in dconc_gt:
+            if not np.isclose(self.dconc[i], chemprod[i], rtol=rtol):
+                msg = f'{self.species_list[i]} concentration change not balanced' +\
+                f' by reactions. Concentartion change: {self.dconc[i]}, production' +\
+                f' by reactions: {chemprod[i]}'
+                warnings.warn(msg)
+
+        for i in dconc_lt:
+            if not np.isclose(self.dconc[i], chemprod[i], atol=atol):
+                msg = f'{self.species_list[i]} concentration change not balanced' +\
+                f'by reactions. Concentartion change: {self.dconc[i]}, production' +\
+                f' by reactions: {chemprod[i]}'
+                warnings.warn(msg)
 
     def check_rate_distribution(self):
         ''' Checks in reaction rates are completely distributed to the pathway's
@@ -1001,6 +1039,57 @@ class Chempath():
         total_pathway_rates = math.fsum(self.rj_del + self.xjk.dot(self.fk))
         return total_pathway_rates
     
+    def order_reactions(self, reaction_idxs, type='loss'):
+        if len(reaction_idxs) < 3:
+            return reaction_idxs
+        order = []
+        prods = {idx: self.reaction_equations[idx].split('=')[1].split('+')
+            for idx in reaction_idxs}
+        reacts = {idx: self.reaction_equations[idx].split('=')[0].split('+')
+            for idx in reaction_idxs}
+        
+        if type == 'loss':
+            in_ = reacts
+            out_ = prods
+        else:
+            in_ = prods
+            out_ = reacts
+        
+        # find first reaction(s)
+        for idx in reacts.keys():
+            for sp in self.ignored_sb:
+                if sp.upper() not in ['HV', 'M'] and sp in in_[idx]:
+                    if idx not in order:
+                        order.append(idx)
+
+
+        def get_next_reaction(curr_react_idx):
+            curr_react_out = out_[curr_react_idx]
+            
+            next_reactions = []
+            for idx in in_.keys():
+                if idx not in order:
+                    if in_[idx] == curr_react_out:
+                        next_reactions.append(idx)
+                        return np.unique(next_reactions)
+                    
+                    for prod in curr_react_out:
+                        if prod in in_[idx]:
+                            next_reactions.append(idx)
+            return np.unique(next_reactions)
+        
+        while True:
+            next_reactions = get_next_reaction(order[-1])
+            if len(next_reactions) == 0:
+                break
+            else:
+                order = np.concatenate([order, next_reactions])
+        
+        for idx in reaction_idxs:
+            if idx not in order:
+                order = np.append(order, idx)
+        return order
+
     def get_pathway_str(self, xjc, format='txt', include_net_reaction=True):
         ''' Gets the string of a pathway given its multiplicities.
         Arguments:
@@ -1015,6 +1104,7 @@ class Chempath():
         react_string = ''
         idxs = xjc.nonzero()[0]
         coeffs = xjc.data
+        coeffs_dict = {k:v for k,v in zip(idxs, coeffs)}
 
         if format == 'txt':
             format_react = format_react_txt
@@ -1027,7 +1117,7 @@ class Chempath():
             format_react = format_react_txt
 
         for i, idx in enumerate(idxs):
-            coeff = coeffs[i]
+            coeff = coeffs_dict[idx]
             # reacts, prods = self.reaction_equations[idx]['reacts'], self.reaction_equations[idx]['prods']
             reacts = self.reaction_equations[idx].split('=')[0].split('+')
             prods = self.reaction_equations[idx].split('=')[1].split('+')
