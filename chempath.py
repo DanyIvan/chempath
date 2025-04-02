@@ -42,7 +42,8 @@ class Chempath():
         dtype=np.float128,
         transport_species = False,
         ignored_sb = [],
-        n_processes = 1
+        n_processes = 1,
+        delete_error_reactions = False
         ):
 
         # path of input reactions equations
@@ -81,8 +82,10 @@ class Chempath():
         self.rj = read_rates(rates_path, dtype=dtype)
         self.delete_zero_reactions()
         self.invert_negative_rates()
-        # part of rate of reaction j deleted pathways
+        # part of rate of reaction j associated with deleted pathways
         self.rj_del = np.zeros(len(self.reaction_equations), dtype=np.float128)
+        # part of rate of reaction j associated with error pathways
+        self.rj_err = np.zeros(len(self.reaction_equations), dtype=np.float128)
         # molecules of species i produces or destroyed by reaction j
         self.sij = get_sij(self.species_list, self.reaction_equations)
         # multiplicity of reaction j in pathway k
@@ -96,8 +99,12 @@ class Chempath():
         self.fk = self.rj
         # rate of production of species i by deleted pathways
         self.pi_del = np.zeros(len(self.species_list), dtype=dtype)
+        # rate of production of species i by error pathways
+        self.pi_err = np.zeros(len(self.species_list), dtype=dtype)
         # rate of destruction of species i by deleted pathways
         self.di_del = np.zeros(len(self.species_list), dtype=dtype)
+        # rate of destruction of species i by error pathways
+        self.di_err = np.zeros(len(self.species_list), dtype=dtype)
         # total rate of production of species i by all pathways
         self.pi = self.pi_del + np.dot(np.multiply(self.mik, self.mik>0), self.fk)
         # total rate of destruction of species i by all pathways
@@ -118,6 +125,10 @@ class Chempath():
             transport_species = [f'{x}_transport' for x in self.species_list]
             self.full_species_list = self.species_list + transport_species
             self.full_sij = get_sij(self.full_species_list, self.reaction_equations)
+
+        self.delete_error_reactions = delete_error_reactions
+        if self.delete_error_reactions:
+            self.del_error_reactions()
 
 
     def reinit(self):
@@ -466,17 +477,17 @@ class Chempath():
         sb_idx = self.sb_idx
         Db = np.max([self.di[sb_idx], self.pi[sb_idx]])
         new_pathways_flag = len(self.prod_idxs) > 0 and len(self.destr_idxs) > 0
-
-        # calculate fraction of rates associated with deleted pathways
-        fdel_prod = np.divide(np.multiply(self.fk[self.prod_idxs],
-            self.di_del[sb_idx]), Db)
-        fdel_destr = np.divide(np.multiply(self.fk[self.destr_idxs],
-            self.pi_del[sb_idx]), Db)
  
          # update deleted pathway variables
         self.connection_del_pathways_rates = 0
         self.connection_del_pathways_rates1 = 0
         if new_pathways_flag:
+            # calculate fraction of rates associated with deleted pathways
+            fdel_prod = np.divide(np.multiply(self.fk[self.prod_idxs],
+                self.di_del[sb_idx]), Db)
+            fdel_destr = np.divide(np.multiply(self.fk[self.destr_idxs],
+            self.pi_del[sb_idx]), Db)
+        
             connection_btwn_del_pathways = self.pi_del[sb_idx] * self.di_del[sb_idx] / Db
             self.connection_btwn_del_pathways = connection_btwn_del_pathways
             # connection with deleted pathways
@@ -536,6 +547,37 @@ class Chempath():
 
             # redefine stuff depending on pathways
             self.recompute_pathway_dependent_variables()
+
+    def del_error_reactions(self):
+        '''Deletes error reactions'''
+        # get indexes of error pathways
+        error_payhway_idxs = []
+        for i in range(self.xjk.shape[1]):
+            pathway_str = self.get_pathway_str(self.xjk[:, i])
+            if 'err' in pathway_str:
+                error_payhway_idxs.append(i)
+
+        # delete error reactions
+        delete_idxs = error_payhway_idxs
+        for i in delete_idxs :
+            posmik = np.multiply(self.mik[:, i], self.mik[:,i]>0)
+            negmik =np.multiply(self.mik[:, i], self.mik[:, i]<0)
+            self.rj_del = self.rj_del + np.squeeze(self.xjk[:,i].toarray()) * self.fk[i]
+            self.pi_del = self.pi_del + posmik * self.fk[i]
+            self.di_del = self.di_del + np.abs(negmik) * self.fk[i]
+
+            self.rj_err = self.rj_err + np.squeeze(self.xjk[:,i].toarray()) * self.fk[i]
+            self.pi_err = self.pi_err + posmik * self.fk[i]
+            self.di_err = self.di_err + np.abs(negmik) * self.fk[i]
+    
+
+        self.fk = np.delete(self.fk, delete_idxs)
+        self.xjk = delete_columns_sparse(self.xjk, delete_idxs)
+        self.pathway_ids = np.delete(self.pathway_ids, delete_idxs)
+
+        # redefine stuff depending on pathways
+        self.recompute_pathway_dependent_variables()
+        
         
     def print_book_keeping_variables(self):
         '''Prints variables useful to keep track of rates during the formation
@@ -940,10 +982,12 @@ class Chempath():
             idxs = destr_idxs
             deleted_pathways_prod = self.di_del[sp_idx]
             total_production = self.di[sp_idx]
+            err_pathways_prod = self.di_err[sp_idx]
         elif on == 'production':
             idxs = prod_idxs
             deleted_pathways_prod = self.pi_del[sp_idx]
             total_production = self.pi[sp_idx]
+            err_pathways_prod = self.pi_err[sp_idx]
 
         contrib = production[idxs] / total_production
         pathways = [self.xjk[:, i] for i in idxs]
@@ -963,8 +1007,14 @@ class Chempath():
                 'contribution': [deleted_pathways_prod/total_production], 
                 'rate':[deleted_pathways_prod],
                 'total_prod': deleted_pathways_prod * self.dt})
+        
+        err_contrib = pd. DataFrame({'pathway_id': ['err'], 
+                'pathway': ['err_pathways'],
+                'contribution': [err_pathways_prod/total_production], 
+                'rate':[err_pathways_prod],
+                'total_prod': err_pathways_prod * self.dt})
 
-        contrib_df = pd.concat([contrib_df, deleted_contrib])
+        contrib_df = pd.concat([contrib_df, deleted_contrib, err_contrib])
         contrib_df['dconc'] = self.dconc[sp_idx]
         contrib_df.sort_values('contribution', ascending=False, inplace=True)
         contrib_df = contrib_df.reset_index(drop=True)
@@ -988,20 +1038,20 @@ class Chempath():
         dconc_lt = np.where(np.abs(self.dconc) < min_concentration)[0]
 
         # calculate production - destruction
-        chemprod = np.dot(self.sij, self.rj) * self.dt
+        chemprod = np.dot(self.sij, self.rj)
 
         # check balance and diplay warning if unbalanced
         for i in dconc_gt:
-            if not np.isclose(self.dconc[i], chemprod[i], rtol=rtol):
+            if not np.isclose(self.dconc[i]/self.dt, chemprod[i], rtol=rtol):
                 msg = f'{self.species_list[i]} concentration change not balanced' +\
-                f' by reactions. Concentartion change: {self.dconc[i]}, production' +\
+                f' by reactions. Concentartion change: {self.dconc[i]/self.dt}, production' +\
                 f' by reactions: {chemprod[i]}'
                 warnings.warn(msg)
 
         for i in dconc_lt:
-            if not np.isclose(self.dconc[i], chemprod[i], atol=atol):
+            if not np.isclose(self.dconc[i]/self.dt, chemprod[i], atol=atol):
                 msg = f'{self.species_list[i]} concentration change not balanced' +\
-                f'by reactions. Concentartion change: {self.dconc[i]}, production' +\
+                f'by reactions. Concentartion change: {self.dconc[i]/self.dt}, production' +\
                 f' by reactions: {chemprod[i]}'
                 warnings.warn(msg)
 
@@ -1014,6 +1064,8 @@ class Chempath():
         rate_conservation = np.isclose(total_rates, total_pathway_rates)
         if not rate_conservation:
             warnings.warn('Rates are not correctly distributed!')
+            print(f'reaction rates:{total_rates}')
+            print(f'pathway rates:{total_pathway_rates}')
 
     def get_pathways_explained_change(self):
         '''Gets dataframe with the fraction of concentration changes explained by

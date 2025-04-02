@@ -3,7 +3,7 @@
 {"reactants": ["O2", "O"], "products": ["O3"], "rate_params": [6e-34, 3e-11, 2.4, 0], "type":"3body"},
 {"reactants": ["O3", "hv"], "products": ["O2", "O"], "rate_params": [1e-3], "type":"photo"},
 {"reactants": ["O3", "O"], "products": ["O2", "O2"], "rate_params": [8e-12, -2060], "type":"2body"},
-{"reactants": ["O3", "hv"], "products": ["O2", "O1D"], "rate_params": [2e-8], "type":"photo"},
+{"reactants": ["O3", "hv"], "products": ["O2", "O1D"], "rate_params": [2e-7], "type":"photo"},
 {"reactants": ["O2", "hv"], "products": ["O", "O1D"], "rate_params": [0.0], "type":"photo"},
 {"reactants": ["H2O", "O1D"], "products": ["OH", "OH"], "rate_params": [2.2E-10, 0], "type":"2body"},
 {"reactants": ["OH", "O3"], "products": ["HO2", "O2"], "rate_params": [1.6E-12, -940], "type":"2body"},

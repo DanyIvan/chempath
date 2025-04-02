@@ -44,7 +44,14 @@ class PhotochemBoxModel():
         for reaction in self.reactions_dict:
             reactants = reaction['reactants']
             products = reaction['products']
-            reactants_idxs = [self.species_list.index(sp) for sp in reactants]
+            reactants_idxs = []
+            for sp in reactants:
+                if sp == 'hv':
+                    idx=-1
+                else:
+                    idx=self.species_list.index(sp) 
+                reactants_idxs.append(idx)
+
             products_idxs = [self.species_list.index(sp) for sp in products]
             reactants_by_idx.append(reactants_idxs)
             products_by_idx.append(products_idxs)
@@ -67,6 +74,11 @@ class PhotochemBoxModel():
             # get reactants concentrations
             r1, r2 = self.reactants_by_idx[i]
             n1, n2 = current_conc[r1], current_conc[r2]
+
+            # set hv as 1
+            if r2 == -1:
+                n2 = 1
+
             if self.reaction_types[i] == '2body':
                 rate_constant = self.rate_params[i][0] * np.exp(self.rate_params[i][1]/temp) 
                 rate = rate_constant * n1 * n2
@@ -157,8 +169,8 @@ class PhotochemBoxModel():
             fig.savefig(f'{self.template_path}/solution.pdf')
             plt.close()
         else:
-            return fig
-        
+            return fig        
+
     def solution_to_chempath_input(self, outpath, step=1, start=0):
         '''Saves the solution to files readable by chempath
         Arguments:
@@ -173,7 +185,7 @@ class PhotochemBoxModel():
         rates = self.solution.rates
         time = self.solution.time
 
-        ntimes = len(time)
+        ntimes = len(time)-1
         # time idx in wich to save files
         idxs = np.arange(start,ntimes,step)
         
@@ -187,18 +199,35 @@ class PhotochemBoxModel():
             # save species concentrations
             np.array([conc[:, idx], conc[:, idx+1]]).\
                 tofile(f'{outpath}/num_densities_{i}.dat')
+            
+            dt = time[idx+1] - time[idx]
+            dn = conc[:, idx+1] - conc[:, idx]
+            dndt = dn/dt
 
             # get mean reaction rate and save it
             mean_reaction_rate = (rates[:, idx+1] + rates[:, idx])/2
-            mean_reaction_rate.tofile(f'{outpath}/rates_{i}.dat')
-
+            # mean_reaction_rate.tofile(f'{outpath}/rates_{i}.dat')
             # get reactions
             reactions = ['+'.join(x['reactants']) + '=' +\
                 '+'.join(x['products']) for x in self.reactions_dict]
+            
+            chemprod = np.dot(self.s_ij, mean_reaction_rate)
+
+            # error rate
+            error_rates = dndt - chemprod
+            err_reactions = [f'{sp}_err = {sp}' for 
+                sp in self.species_list]
+            
+            # concatenate all reaction and rates
+            all_reactions = np.concatenate([reactions, err_reactions])
+            all_rates = np.concatenate([mean_reaction_rate, error_rates])
+            
+            # save rates
+            all_rates.tofile(f'{outpath}/rates_{i}.dat')
 
             # save reaction equations and species names
             if i == 0:
-                np.savetxt(f'{outpath}/reactions.txt', reactions,
+                np.savetxt(f'{outpath}/reactions.txt', all_reactions,
                     fmt="%s", delimiter=',')
                 np.savetxt(f'{outpath}/species.txt', self.species_list,
                     fmt="%s", delimiter=',')      

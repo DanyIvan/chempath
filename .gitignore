@@ -1,6 +1,8 @@
 .DS_Store
 
 examples/box_model_pathways/chempath_input/*
+examples/box_model_pathways/*.pdf
+examples/photochem_modern_earth/*.pdf
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

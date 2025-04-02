@@ -12,7 +12,7 @@ def get_chempath(input_folder, ignored_sb=[]):
         conc_path=f'{input_folder}/concentrations.dat',
         time_path=f'{input_folder}/model_time.dat',
         f_min=0, 
-        dtype=np.float128,
+        dtype=np.float64,
         ignored_sb = ignored_sb
     )
     return chempath

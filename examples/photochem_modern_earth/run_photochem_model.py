@@ -23,7 +23,7 @@ def get_reactants_idxs(species_names, reaction_equations):
     r2 = np.array(r2)
     return r1, r2
 
-def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
+def run_model(output_path, o2_flux=2.5e11, tf=1e15):
     '''
     Run photochem model until model time reaches tf and save output after model
     time reaches t_save
@@ -47,15 +47,10 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
                     settings_file,\
                     star_file,\
                     atmosphere_file)
-    
+
     initial_conditions = pc.wrk.usol
-    pc.initialize_stepper(initial_conditions)
-    while True:
-        tn = pc.step()
-        print('Current time in integration: %e s'%tn,end='\r')
-        converged = pc.check_for_convergence()
-        if converged:
-            break
+    pc.initialize_robust_stepper(initial_conditions)
+    pc.find_steady_state()
 
     # decrease O2 flux
     pc.set_lower_bc('O2',bc_type='flux',flux=o2_flux)
@@ -68,28 +63,37 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     mixing_ratios = []
     reaction_rates = []
     rainout_rates = []
+    transport_rates = []
+    distributed_fluxes = []
     time = []
 
     # run model until time tf
-    pc.var.atol = 1e-21
+    pc.var.atol = 1e-22
     pc.initialize_stepper(pc.wrk.usol)
     tn = 0
     while tn < tf:
-        tn = pc.step()
-        if tn > t_save:
+        pc.robust_step()
+        tn = pc.wrk.tn
+        # if tn > t_save:
             # save number densities
-            num_densities.append(pc.wrk.densities.astype(np.float128))
-            mixing_ratios.append(pc.wrk.densities / pc.wrk.density)
-            densities = np.vstack([pc.wrk.densities, pc.wrk.densities[-1]])
-            # calculate and save reaction rates
-            rates = np.multiply(pc.wrk.rx_rates.T, densities[r1,:])
-            rates = np.multiply(rates, densities[r2,:])
-            reaction_rates.append(rates.astype(np.float128))
-            # save rainout rates
-            rainout_rates.append(np.transpose(pc.wrk.rainout_rates.astype(np.float128)))
-            # save model time
-            time.append(np.float128(tn))
-    pc.destroy_stepper()
+        num_densities.append(pc.wrk.densities.astype(np.float128))
+        mixing_ratios.append(pc.wrk.densities / pc.wrk.density)
+        densities = np.vstack([pc.wrk.densities, pc.wrk.densities[-1]])
+        # calculate and save reaction rates
+        rates = np.multiply(pc.wrk.rx_rates.T, densities[r1,:])
+        rates = np.multiply(rates, densities[r2,:])
+        reaction_rates.append(rates.astype(np.float128))
+        # save rainout rates
+        rainout = np.multiply(pc.wrk.rainout_rates, 
+                pc.wrk.densities[:pc.dat.nq,:])
+        rainout_rates.append(rainout.astype(np.float128))
+        # save transport rates
+        transport_rates.append(pc.wrk.transport_rates.astype(np.float128))
+        # save distributed fluxes
+        distributed_fluxes.append(pc.wrk.distributed_fluxes.astype(np.float128))
+        # save model time
+        time.append(np.float128(tn))
+
 
     num_densities = np.array(num_densities)
     mixing_ratios = np.array(mixing_ratios)
@@ -97,6 +101,8 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     num_densities = num_densities[:, :-1, :]
     reaction_rates = np.array(reaction_rates)
     rainout_rates = np.array(rainout_rates)
+    transport_rates = np.array(transport_rates)
+    distributed_fluxes = np.array(distributed_fluxes)
     time = np.array(time).astype(np.float128)
 
     # save model output to files
@@ -107,6 +113,8 @@ def run_model(output_path, o2_flux=2.5e11, tf=1e15, t_save=1e11):
     reaction_rates.tofile(f'{output_path}/reaction_rates.dat')
     np.savetxt(f'{output_path}/reaction_rates.shape', reaction_rates.shape)
     rainout_rates.tofile(f'{output_path}/rainout_rates.dat')
+    transport_rates.tofile(f'{output_path}/transport_rates.dat')
+    distributed_fluxes.tofile(f'{output_path}/distributed_fluxes.dat')
     time.tofile(f'{output_path}/time.dat')
     np.savetxt(f'{output_path}/rainout_rates.shape', rainout_rates.shape)
     reactions = [x.replace('=>', '=') for x in pc.dat.reaction_equations]
