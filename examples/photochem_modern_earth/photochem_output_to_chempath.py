@@ -16,6 +16,10 @@ reaction_rates = np.fromfile(f'{INPUT_PATH}/reaction_rates.dat',
 rain_shape = np.loadtxt(f'{INPUT_PATH}/rainout_rates.shape').astype(int)
 rainout_rates = np.fromfile(f'{INPUT_PATH}/rainout_rates.dat',
     dtype=np.float128).reshape(rain_shape)
+transport_rates = np.fromfile(f'{INPUT_PATH}/transport_rates.dat',
+    dtype=np.float128).reshape(rain_shape)
+distributed_fluxes = np.fromfile(f'{INPUT_PATH}/distributed_fluxes.dat',
+    dtype=np.float128).reshape(rain_shape)
 times = np.fromfile(f'{INPUT_PATH}/time.dat', dtype=np.float128)
 ispec = np.loadtxt(f'{INPUT_PATH}/species.txt', dtype=str, delimiter=',')
 reactions = np.loadtxt(f'{INPUT_PATH}/reactions.txt', dtype=str, delimiter=',')
@@ -63,6 +67,18 @@ def photochem_to_cehmpath(output_path, layer=None):
         # use only one layer
         alts = [alts[layer]]
 
+    # get one time ponts per order of magnitude
+    idxs1= [np.where(times==times[times>x][0])[0][0] 
+        for x in np.logspace(1, 12, 12)]
+    # get 15 time points between 1e12 and 1e13 seconds
+    to13 = np.where((times>1e12) & (times<1e13))[0]
+    to13_i = int(to13.shape[0]/15)
+    # get 15 time points between 1e13 and 1e15 seconds
+    to15 = np.where((times>1e13))[0]
+    to15_i = int(to15.shape[0]/15)
+    idxs2 = np.concatenate([to13[::to13_i], to15[::to15_i]])
+    time_idxs = np.concatenate([idxs1, idxs2, [times.shape[0]-1]])
+
     # for each altitude
     for j, alt in enumerate(alts):
         if layer or layer != 0:
@@ -71,10 +87,12 @@ def photochem_to_cehmpath(output_path, layer=None):
         # get output at this altitude
         num_densities_alt = num_densities[:, :, j].astype(np.float128)
         reaction_rates_alt = reaction_rates[:,:,j].astype(np.float128)
-        rainout_rates_alt = rainout_rates[:,j,:].astype(np.float128)
+        rainout_rates_alt = rainout_rates[:,:, j].astype(np.float128)
+        transport_rates_alt = transport_rates[:,:, j].astype(np.float128)
+        dist_flux_alt = distributed_fluxes[:,:, j].astype(np.float128)
 
         # for each time
-        for i in range(len(times)-1):
+        for i in time_idxs:
             print(i)
             pathlib.Path(f'{output_path}/{j}/').mkdir(exist_ok=True, parents=True)
             
@@ -93,21 +111,35 @@ def photochem_to_cehmpath(output_path, layer=None):
             # append zeros so rainout has the same shape as rates
             mean_rainout_rate = np.concatenate([mean_rainout_rate, np.zeros(2)])
 
-            # calculate transport
+            # get transport rates
+            transport_reactions = [f'{sp}_transport = {sp}' for sp in ispec]
+            mean_transport_rate = (transport_rates_alt[i+1] + transport_rates_alt[i])/2
+            # append zeros so transport has the same shape as rates
+            mean_transport_rate = np.concatenate([mean_transport_rate, np.zeros(2)])
+
+            # get distributed fluxes
+            dist_flux_reactions = [f'{sp}_distflx = {sp}' for sp in ispec]
+            mean_dist_flux= (dist_flux_alt[i+1] + dist_flux_alt[i])/2
+            # append zeros so transport has the same shape as rates
+            mean_dist_flux= np.concatenate([mean_dist_flux, np.zeros(2)])
+
+            # calculate error rates
             dn_dt = num_den_change/dt
             chemprod = np.dot(sij, mean_reaction_rate)
             # chemprod[73:] = 0 # photochemical steady state for SL species
             # assuming that dn = (P-L)dt + Rdt + Phi*dt
-            chemprod_and_rainout = chemprod - mean_rainout_rate
-            transport_rates = (dn_dt -chemprod_and_rainout)
-            # get transport reactions
-            transport_reactions = [f'{sp}_transport = {sp}' for sp in ispec]
+            total_prod = chemprod + mean_transport_rate -\
+                mean_rainout_rate + mean_dist_flux
+            error_rates = (dn_dt -total_prod)
+            # get error reactions
+            err_reactions = [f'{sp}_err = {sp}' for sp in ispec]
 
             # concatenate all reaction and rates
-            all_reactions = np.concatenate([reactions,
-                rainout_reactions, transport_reactions])
+            all_reactions = np.concatenate([reactions, rainout_reactions,
+                transport_reactions, dist_flux_reactions, err_reactions])
             all_rates = np.concatenate([mean_reaction_rate, 
-                mean_rainout_rate, transport_rates])
+                mean_rainout_rate, mean_transport_rate, mean_dist_flux,
+                error_rates])
             
             # save rates
             all_rates.tofile(f'{output_path}/{j}/rates_{i}.dat')
