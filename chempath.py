@@ -36,6 +36,7 @@ class Chempath():
         ):
 
         with h5py.File(h5py_path, 'r') as datafile:
+            self.h5py_path = h5py_path
             self.f_min = f_min
             # ignore_warnings
             self.warnings = warnings
@@ -114,14 +115,9 @@ class Chempath():
     def reinit(self):
         '''Re-initializes the chempath object with the input information'''
         self.__init__(
-        reactions_path = self.reactions_path,
-        rates_path = self.rates_path,
-        species_path = self.species_path,
-        conc_path = self.conc_path,
-        time_path = self.time_path,
+        h5py_path=self.h5py_path,
         f_min = self.f_min,
         warnings = self.warnings,
-        dtype = self.dtype,
         transport_species = self.transport_species,
         ignored_sb = self.ignored_sb,
         n_processes = self.n_processes
