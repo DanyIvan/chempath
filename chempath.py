@@ -102,6 +102,9 @@ class Chempath():
             self.rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
             self.pi_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
             self.di_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+            self.rj_err_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+            self.pi_err_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+            self.di_err_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
             if transport_species:
                 transport_species = [f'{x}_transport' for x in self.species_list]
                 self.full_species_list = self.species_list + transport_species
@@ -138,6 +141,8 @@ class Chempath():
         with h5py.File(f'{filespath}/chempath_info.hdf5', 'r') as datafile:
             # part of rate of reaction j deleted pathways
             self.rj_del = datafile['rj_del'][:]
+             # part of rate of reaction j error pathways
+            self.rj_err = datafile['rj_err'][:]
             # rates of pathways
             self.fk = datafile['fk'][:]
             # rate of production of species i by deleted pathways
@@ -203,7 +208,7 @@ class Chempath():
             self.sb_order[next_sb_idx] = len(self.sb_list) - 1
             return next_sb
         return None
-
+    
     def delete_zero_reactions(self):
         '''Deletes reactions with a zero rate'''
         delete_idxs = np.where(self.rj == 0)[0]
@@ -265,6 +270,9 @@ class Chempath():
         rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
         pi_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
         di_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+        rj_err_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+        pi_err_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+        di_err_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
         fk_temp = np.zeros(len(self.fk), dtype=np.longdouble)
 
         # calculate new multiplicities so that sb is recycled
@@ -293,6 +301,12 @@ class Chempath():
                 rj_del_temp = rj_del_temp + np.squeeze(xjn.toarray()) * fn
                 pi_del_temp = pi_del_temp + posmi_n * fn
                 di_del_temp = di_del_temp + np.abs(negmi_n) * fn
+                
+                if 'err' in self.get_pathway_str(xjn):
+                    rj_err_temp = rj_err_temp + np.squeeze(xjn.toarray()) * fn
+                    pi_err_temp = pi_err_temp + posmi_n * fn
+                    di_err_temp = di_err_temp + np.abs(negmi_n) * fn
+
                 continue
 
             # if pathway already exists, do not repeat it, just add its rate:
@@ -310,7 +324,8 @@ class Chempath():
                 fk_new.append(fn)
                 pid_new.append(pid_n)
 
-        return xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp, di_del_temp
+        return xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp,\
+            di_del_temp, rj_err_temp, pi_err_temp, di_err_temp
     
     def form_new_pathways(self):
         '''Finds new pathways and appends their multiplicities and rates  to
@@ -340,7 +355,7 @@ class Chempath():
                         delayed(self.connect_pathways)(i) for i in idxs)
                 # collect results from multiple jobs
                 xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp,\
-                    di_del_temp = zip(*results)
+                    di_del_temp, rj_err_temp, pi_err_temp, di_err_temp = zip(*results)
                 xjk_new = flatten_list(xjk_new)
                 fk_new = flatten_list(fk_new)
                 pid_new = flatten_list(pid_new)
@@ -348,15 +363,23 @@ class Chempath():
                 rj_del_temp = np.sum(rj_del_temp, axis=0)
                 pi_del_temp = np.sum(pi_del_temp, axis=0)
                 di_del_temp = np.sum(di_del_temp, axis=0)
+                rj_err_temp = np.sum(rj_err_temp, axis=0)
+                pi_err_temp = np.sum(pi_err_temp, axis=0)
+                di_err_temp = np.sum(di_err_temp, axis=0)
             else:
                 # find new pathways in a single process
                 xjk_new, fk_new, pid_new, fk_temp, rj_del_temp, pi_del_temp,\
-                    di_del_temp = self.connect_pathways((self.prod_idxs, self.destr_idxs))
+                    di_del_temp, rj_err_temp, pi_err_temp, di_err_temp = \
+                        self.connect_pathways((self.prod_idxs, self.destr_idxs))
             
             # update deleted pathway rates
             self.rj_del_temp = rj_del_temp
             self.pi_del_temp = pi_del_temp
             self.di_del_temp = di_del_temp
+
+            self.rj_err_temp = rj_err_temp
+            self.pi_err_temp = pi_err_temp
+            self.di_err_temp = di_err_temp
 
             # include new pathways
             if len(xjk_new) > 0:
@@ -511,8 +534,14 @@ class Chempath():
             # delete pathways with rate lower than fmin
             delete_idxs = np.where(self.fk < self.f_min)[0]
             for i in delete_idxs :
+                pathway_str = self.get_pathway_str(self.xjk[:, i])
                 posmik = np.multiply(self.mik[:, i], self.mik[:,i]>0)
                 negmik =np.multiply(self.mik[:, i], self.mik[:, i]<0)
+                if 'err' in pathway_str:
+                    self.rj_err = self.rj_err + np.squeeze(self.xjk[:,i].toarray()) * self.fk[i]
+                    self.pi_err = self.pi_err + posmik * self.fk[i]
+                    self.di_err = self.di_err + np.abs(negmik) * self.fk[i]
+
                 self.rj_del = self.rj_del + np.squeeze(self.xjk[:,i].toarray()) * self.fk[i]
                 self.pi_del = self.pi_del + posmik * self.fk[i]
                 self.di_del = self.di_del + np.abs(negmik) * self.fk[i]
@@ -521,6 +550,10 @@ class Chempath():
             self.rj_del += self.rj_del_temp
             self.pi_del += self.pi_del_temp
             self.di_del += self.di_del_temp
+
+            self.rj_err += self.rj_err_temp
+            self.pi_err += self.pi_err_temp
+            self.di_err += self.di_err_temp
 
             self.fk = np.delete(self.fk, delete_idxs)
             self.xjk = delete_columns_sparse(self.xjk, delete_idxs)
@@ -973,7 +1006,7 @@ class Chempath():
         contrib = production[idxs] / total_production
         pathways = [self.xjk[:, i] for i in idxs]
         rates = self.fk[idxs]
-        total_prod = np.multiply(self.mik[sp_idx, idxs], self.fk[idxs])*self.dt
+        total_prod = np.multiply(self.mik[sp_idx, idxs], self.fk[idxs])
         p_ids = self.pathway_ids[idxs]
         p_strs = [self.get_pathway_str(p, format=format) for p in pathways]
         
@@ -987,13 +1020,13 @@ class Chempath():
                 'pathway': ['deleted_pathways'],
                 'contribution': [deleted_pathways_prod/total_production], 
                 'rate':[deleted_pathways_prod],
-                'total_prod': deleted_pathways_prod * self.dt})
+                'total_prod': deleted_pathways_prod})
         
         err_contrib = pd. DataFrame({'pathway_id': ['err'], 
                 'pathway': ['err_pathways'],
                 'contribution': [err_pathways_prod/total_production], 
                 'rate':[err_pathways_prod],
-                'total_prod': err_pathways_prod * self.dt})
+                'total_prod': err_pathways_prod})
 
         contrib_df = pd.concat([contrib_df, deleted_contrib, err_contrib])
         contrib_df['dconc'] = self.dconc[sp_idx]
@@ -1234,6 +1267,8 @@ class Chempath():
                 data=self.di_err)
             datafile.create_dataset("rj_del", self.rj_del.shape, dtype='f16', 
                 data=self.rj_del)
+            datafile.create_dataset("rj_err", self.rj_err.shape, dtype='f16', 
+                data=self.rj_err)
             datafile.create_dataset("sb_list", [len(self.sb_list)], 
                     dtype=h5py.string_dtype(), data=self.sb_list)
             datafile.create_dataset("ignored_sb", [len(self.ignored_sb)], 
@@ -1411,5 +1446,3 @@ def get_latex_contribution_table(contribution_df, nrows=5, id_suffix=''):
 
 class TimeoutError(Exception):
     pass
-
-
