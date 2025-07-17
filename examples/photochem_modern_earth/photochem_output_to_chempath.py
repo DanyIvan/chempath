@@ -1,7 +1,7 @@
 import numpy as np
-from photochem import EvoAtmosphere, zahnle_earth
 import pathlib
 from multiprocessing import Pool
+import h5py
     
 INPUT_PATH = 'photochem_output'
 OUTPUT_PATH = 'chempath_input'
@@ -23,6 +23,8 @@ distributed_fluxes = np.fromfile(f'{INPUT_PATH}/distributed_fluxes.dat',
 times = np.fromfile(f'{INPUT_PATH}/time.dat', dtype=np.float128)
 ispec = np.loadtxt(f'{INPUT_PATH}/species.txt', dtype=str, delimiter=',')
 reactions = np.loadtxt(f'{INPUT_PATH}/reactions.txt', dtype=str, delimiter=',')
+reactions = [str(x) for x in reactions]
+ispec = [str(x) for x in ispec]
 
 def get_sij(species_names, reaction_equations):
     '''Gets number of molecules/cm^3 or ppb of species i produced by reaction j in
@@ -78,7 +80,7 @@ def photochem_to_cehmpath(output_path, layer=None):
     to15_i = int(to15.shape[0]/15)
     idxs2 = np.concatenate([to13[::to13_i], to15[::to15_i]])
     time_idxs = np.concatenate([idxs1, idxs2, [times.shape[0]-1]])
-
+    time_idxs = time_idxs[:-1]
     # for each altitude
     for j, alt in enumerate(alts):
         if layer or layer != 0:
@@ -94,73 +96,80 @@ def photochem_to_cehmpath(output_path, layer=None):
         # for each time
         for i in time_idxs:
             print(i)
+            h5py.string_dtype(encoding='utf-8', length=None)
             pathlib.Path(f'{output_path}/{j}/').mkdir(exist_ok=True, parents=True)
-            
-            # get dt
-            dt = times[i+1] - times[i]
+            h5py_filename = f"{output_path}/{j}/photochem_output_{i}.hdf5"
+            with h5py.File(h5py_filename, "w") as datafile:
+                # get dt
+                dt = times[i+1] - times[i]
+                model_time = np.array([times[i], times[i+1]])
 
-            # get conc change
-            num_den_change = num_densities_alt[i+1] - num_densities_alt[i]
+                # number densities
+                nd = np.array([num_densities_alt[i], num_densities_alt[i+1]])
 
-            # get mean reaction rates
-            mean_reaction_rate = (reaction_rates_alt[i+1] + reaction_rates_alt[i])/2
+                # get conc change
+                num_den_change = num_densities_alt[i+1] - num_densities_alt[i]
 
-            # get rainout rates
-            rainout_reactions = [f'{x} = {x}_rainout' for x in ispec]
-            mean_rainout_rate = (rainout_rates_alt[i+1] + rainout_rates_alt[i])/2
-            # append zeros so rainout has the same shape as rates
-            mean_rainout_rate = np.concatenate([mean_rainout_rate, np.zeros(2)])
+                # get mean reaction rates
+                mean_reaction_rate = (reaction_rates_alt[i+1] + reaction_rates_alt[i])/2
 
-            # get transport rates
-            transport_reactions = [f'{sp}_transport = {sp}' for sp in ispec]
-            mean_transport_rate = (transport_rates_alt[i+1] + transport_rates_alt[i])/2
-            # append zeros so transport has the same shape as rates
-            mean_transport_rate = np.concatenate([mean_transport_rate, np.zeros(2)])
+                # get rainout rates
+                rainout_reactions = [f'{x} = {x}_rainout' for x in ispec]
+                mean_rainout_rate = (rainout_rates_alt[i+1] + rainout_rates_alt[i])/2
+                # append zeros so rainout has the same shape as rates
+                mean_rainout_rate = np.concatenate([mean_rainout_rate, np.zeros(2)])
 
-            # get distributed fluxes
-            dist_flux_reactions = [f'{sp}_distflx = {sp}' for sp in ispec]
-            mean_dist_flux= (dist_flux_alt[i+1] + dist_flux_alt[i])/2
-            # append zeros so transport has the same shape as rates
-            mean_dist_flux= np.concatenate([mean_dist_flux, np.zeros(2)])
+                # get transport rates
+                transport_reactions = [f'{sp}_transport = {sp}' for sp in ispec]
+                mean_transport_rate = (transport_rates_alt[i+1] + transport_rates_alt[i])/2
+                # append zeros so transport has the same shape as rates
+                mean_transport_rate = np.concatenate([mean_transport_rate, np.zeros(2)])
 
-            # calculate error rates
-            dn_dt = num_den_change/dt
-            chemprod = np.dot(sij, mean_reaction_rate)
-            # chemprod[73:] = 0 # photochemical steady state for SL species
-            # assuming that dn = (P-L)dt + Rdt + Phi*dt
-            total_prod = chemprod + mean_transport_rate -\
-                mean_rainout_rate + mean_dist_flux
-            error_rates = (dn_dt -total_prod)
-            # get error reactions
-            err_reactions = [f'{sp}_err = {sp}' for sp in ispec]
+                # get distributed fluxes
+                dist_flux_reactions = [f'{sp}_distflx = {sp}' for sp in ispec]
+                mean_dist_flux= (dist_flux_alt[i+1] + dist_flux_alt[i])/2
+                # append zeros so transport has the same shape as rates
+                mean_dist_flux= np.concatenate([mean_dist_flux, np.zeros(2)])
 
-            # concatenate all reaction and rates
-            all_reactions = np.concatenate([reactions, rainout_reactions,
-                transport_reactions, dist_flux_reactions, err_reactions])
-            all_rates = np.concatenate([mean_reaction_rate, 
-                mean_rainout_rate, mean_transport_rate, mean_dist_flux,
-                error_rates])
-            
-            # save rates
-            all_rates.tofile(f'{output_path}/{j}/rates_{i}.dat')
-            # save model time
-            np.array([times[i], times[i+1]]).\
-                tofile(f'{output_path}/{j}/time_{i}.dat')
-            # save number densities
-            np.array([num_densities_alt[i], num_densities_alt[i+1]]).\
-                tofile(f'{output_path}/{j}/num_densities_{i}.dat')
-            
-            # save reaction system and species names
-            if i == 0:
-                np.savetxt(f'{output_path}/{j}/reactions.txt', all_reactions,
-                    fmt="%s", delimiter=',')
-                np.savetxt(f'{output_path}/{j}/species.txt', ispec,
-                    fmt="%s", delimiter=',')
+                # calculate error rates
+                dn_dt = num_den_change/dt
+                chemprod = np.dot(sij, mean_reaction_rate)
+                # chemprod[73:] = 0 # photochemical steady state for SL species
+                # assuming that dn = (P-L)dt + Rdt + Phi*dt
+                total_prod = chemprod + mean_transport_rate -\
+                    mean_rainout_rate + mean_dist_flux
+                error_rates = (dn_dt -total_prod)
+                # get error reactions
+                err_reactions = [f'{sp}_err = {sp}' for sp in ispec]
+
+                # concatenate all reaction and rates
+                all_reactions = reactions + rainout_reactions +\
+                    transport_reactions + dist_flux_reactions + err_reactions
+                all_rates = np.concatenate([mean_reaction_rate, 
+                    mean_rainout_rate, mean_transport_rate, mean_dist_flux,
+                    error_rates])
                 
+                # save rates
+                datafile.create_dataset("rates", all_rates.shape, 
+                    dtype='f16', data=all_rates)
+                # save model time
+                datafile.create_dataset("model_time", model_time.shape, dtype='f16', 
+                    data=model_time)
+                # save number densities
+                datafile.create_dataset("num_densities", nd.shape, 
+                    dtype='f16', data=nd)
+                # save reaction equations and species names
+                datafile.create_dataset("reaction_equations", [len(all_reactions)], 
+                    dtype=h5py.string_dtype(), data=all_reactions)
+                datafile.create_dataset("species_names", [len(ispec)], 
+                    dtype=h5py.string_dtype(), data=ispec)
+                    
 
 # run each altutude in a different process
 layers = np.arange(0,100, dtype=int)
 def photochem2PAP_wrapper(layer):
     photochem_to_cehmpath(OUTPUT_PATH, layer=layer)
-with Pool(processes=30) as pool:
-    pool.map(photochem2PAP_wrapper, layers)
+
+for layer in layers:
+    photochem2PAP_wrapper(layer)
+
