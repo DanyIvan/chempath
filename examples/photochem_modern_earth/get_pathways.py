@@ -1,9 +1,11 @@
-from chempath import Chempath
+from chempath6 import Chempath
 import pandas as pd
 import pathlib
 from multiprocessing import Pool
 from functools import partial
 import numpy as np
+import os
+import glob
 
 
 OUTPUT_FOLDER = 'pathways'
@@ -24,12 +26,9 @@ def get_pathways_contributions(alt_idx, time_idx):
     '''Gets pathways contributions at an specific altitude and time index'''
     # get a chempath object
     chempath = Chempath(
-        reactions_path=f'{INPUT_PATH}/{alt_idx}/reactions.txt',
-        rates_path=f'{INPUT_PATH}/{alt_idx}/rates_{time_idx}.dat',
-        species_path=f'{INPUT_PATH}/{alt_idx}/species.txt',
-        conc_path=f'{INPUT_PATH}/{alt_idx}/num_densities_{time_idx}.dat',
-        time_path=f'{INPUT_PATH}/{alt_idx}/time_{time_idx}.dat',
-        transport_species = True
+        h5py_path=f'{INPUT_PATH}/{alt_idx}/photochem_output_{time_idx}.hdf5',
+        transport_species = True,
+        delete_error_reactions = False
     )
 
     # ignore these species as branching-points
@@ -40,8 +39,11 @@ def get_pathways_contributions(alt_idx, time_idx):
     f_min = get_fmin(chempath)
     chempath.f_min = f_min
 
-    # find all pathways
-    chempath.find_all_pathways()
+    e = chempath.find_all_pathways(timeout=60*60*2) 
+            #method='lehmann')
+    chempath.del_error_reactions()
+    if e == 'timed out':
+        return None, None
 
     # get contributions
     alt = np.arange(0.5,100, 1)
@@ -96,5 +98,17 @@ def get_all_contrib_dfs(time_idx):
         compression='gzip')
 
 
-time_idx = 169
-get_all_contrib_dfs(time_idx)
+cwd = os.getcwd()
+folder = 'pathways'
+
+def get_idxs(name):
+    i1 = name.rfind('_') + 1
+    i2 = name.rfind('.') 
+    return int(name[i1:i2])
+
+files = glob.glob(folder+'/0/photochem_output*')
+time_idxs = [get_idxs(x) for x in files]
+time_idxs = np.sort(time_idxs)[::-1]
+
+for i in time_idxs:
+    get_all_contrib_dfs(i)

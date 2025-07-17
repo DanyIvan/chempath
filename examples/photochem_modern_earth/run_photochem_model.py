@@ -155,6 +155,39 @@ def save_number_densities(path):
     # save data to csv file
     data.to_csv(f'{OUTPUT_FOLDER}/number_densities.csv', compression='gzip')
 
+def save_mixing_ratios(path):
+    # species to save data for
+    species = ['O2', 'O3', 'CH4', 'CO', 'H2', 'OH', 'HO2', 'O', 'NO','NO2', 
+        'CH3O2']
+    # read species file
+    ispec = np.loadtxt(f'{path}/species.txt', dtype=str, delimiter=',')
+
+    # read number densities
+    num_den_shape = np.loadtxt(f'{path}/num_densities.shape').astype(int)
+    num_den_shape[1] = num_den_shape[1] +1
+    mixing_ratios = np.fromfile(f'{path}/mixing_ratios.dat',
+        dtype=np.float64).reshape(num_den_shape)
+
+    # read time
+    times = np.fromfile(f'{path}/time.dat', dtype=np.float128)
+    alts = np.arange(0.5, 100, 1)
+
+    # get species indexes
+    sp_idx = np.array([np.where(ispec == sp)[0][0] for sp in species])
+
+    # create a dataframe with number densities
+    data = []
+    for i in range(0, len(times)):
+        data_sp = pd.DataFrame(mixing_ratios[i, sp_idx, :].T.astype(float),
+            columns=species)
+        data_sp['time'] = times[i]
+        data_sp['alt'] = alts
+        data.append(data_sp)
+    data = pd.concat(data)
+
+    # save data to csv file
+    data.to_csv(f'{OUTPUT_FOLDER}/mixing_ratios.csv', compression='gzip')
+
 # run model for 5 my
 yrs=60*60*24*365
 run_model(OUTPUT_FOLDER, tf=5*yrs*1e6, t_save=0.1*yrs*1e6)

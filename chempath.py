@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from itertools import product
 from scipy.optimize import lsq_linear, linprog
-from copy import deepcopy
 from scipy import sparse
 from string import Template
 import errno
 import os
-import sys
+import h5py
 import signal
 import warnings 
 from joblib import Parallel, delayed
@@ -18,13 +17,8 @@ class Chempath():
     '''
     Pathway analysis program class.
     Arguments:
-        reactions_path(str): path of input reactions equations
-        rates_path (str): path of input reactions rates
-        species_path (str): path of input species names
-        conc_path (str): path of input species concentrations
-        time_path (str): path of input model time
+        h5py_path (str): path of h5py data file containing input data
         f_min (float): minimum rate of pathways. Defaults to 0.0
-        dtype (type): number type of numerical fields
         ignored_sb (list): List of species ignored as branching-points. These
             species will not be considered as branching-point species.
         n_processes (int): Number of processes to use to construct pathways. If
@@ -32,151 +26,138 @@ class Chempath():
             multiprocessing
     '''
     def __init__(self, 
-        reactions_path,
-        rates_path,
-        species_path,
-        conc_path,
-        time_path,
+        h5py_path,
         f_min=0, 
         warnings=True, 
-        dtype=np.float128,
         transport_species = False,
         ignored_sb = [],
         n_processes = 1,
         delete_error_reactions = False
         ):
 
-        # path of input reactions equations
-        self.reactions_path = reactions_path
-        # path of input reactions rates
-        self.rates_path = rates_path
-        # path of input species names
-        self.species_path = species_path
-        # path of input species concentrations
-        self.conc_path = conc_path
-        # path of input model time
-        self.time_path = time_path
-        # path of input model time
-        self.f_min = f_min
-        # ignore_warnings
-        self.warnings = warnings
-        # number type of numerical fields
-        self.dtype = dtype
-        # time 
-        self.time = read_time_file(time_path, dtype=dtype)
-        self.dt = self.time[1] - self.time[0]
-        # model time
-        self.mean_time = np.mean(self.time)
-        # species list
-        self.species_list = read_species_file(species_path)
-        # concentrations
-        self.conc = read_conc_file(conc_path, len(self.species_list), dtype=dtype)
-        # concentratio change
-        self.dconc = self.conc[1] - self.conc[0]
-        # mean concentration
-        self.mean_conc = np.trapezoid(self.conc,self.time, axis=0) / self.dt
-        # mean rate of concentration change
-        self.mean_dconc = np.array(self.dconc) / self.dt 
-        # reactions and rates
-        self.reaction_equations = read_reactions_file(reactions_path)
-        self.rj = read_rates(rates_path, dtype=dtype)
-        self.delete_zero_reactions()
-        self.invert_negative_rates()
-        # part of rate of reaction j associated with deleted pathways
-        self.rj_del = np.zeros(len(self.reaction_equations), dtype=np.float128)
-        # part of rate of reaction j associated with error pathways
-        self.rj_err = np.zeros(len(self.reaction_equations), dtype=np.float128)
-        # molecules of species i produces or destroyed by reaction j
-        self.sij = get_sij(self.species_list, self.reaction_equations)
-        # multiplicity of reaction j in pathway k
-        self.xjk = np.diag(np.ones(len(self.reaction_equations), dtype=int))
-        self.xjk = sparse.csc_matrix(self.xjk)
-        # list of pathways pathways by unique id
-        self.pathway_ids = xjk_to_id_list(self.xjk)
-        # molecules of species i produces or destroyed by pathway k
-        self.mik = sparse_dot(self.sij, self.xjk)
-        # rates of pathways
-        self.fk = self.rj
-        # rate of production of species i by deleted pathways
-        self.pi_del = np.zeros(len(self.species_list), dtype=dtype)
-        # rate of production of species i by error pathways
-        self.pi_err = np.zeros(len(self.species_list), dtype=dtype)
-        # rate of destruction of species i by deleted pathways
-        self.di_del = np.zeros(len(self.species_list), dtype=dtype)
-        # rate of destruction of species i by error pathways
-        self.di_err = np.zeros(len(self.species_list), dtype=dtype)
-        # total rate of production of species i by all pathways
-        self.pi = self.pi_del + np.dot(np.multiply(self.mik, self.mik>0), self.fk)
-        # total rate of destruction of species i by all pathways
-        self.di = self.di_del + np.dot(np.abs(np.multiply(self.mik, self.mik<0)), self.fk)
-        # list of used banching species
-        self.sb_list = []
-        self.sb_order = {}
-        self.ignored_sb = ignored_sb
-        # number of processes to use to construct pathways
-        self.n_processes = n_processes
-        # full list of species including transport species
-        self.transport_species = transport_species
-        # temporary variables to store deleted pathway rates
-        self.rj_del_temp = np.zeros(len(self.reaction_equations), dtype=dtype)
-        self.pi_del_temp = np.zeros(len(self.species_list), dtype=dtype)
-        self.di_del_temp = np.zeros(len(self.species_list), dtype=dtype)
-        if transport_species:
-            transport_species = [f'{x}_transport' for x in self.species_list]
-            self.full_species_list = self.species_list + transport_species
-            self.full_sij = get_sij(self.full_species_list, self.reaction_equations)
+        with h5py.File(h5py_path, 'r') as datafile:
+            self.h5py_path = h5py_path
+            self.f_min = f_min
+            # ignore_warnings
+            self.warnings = warnings
+            # time 
+            self.time = datafile['model_time'][:]
+            self.dt = self.time[1] - self.time[0]
+            # model time
+            self.mean_time = np.mean(self.time)
+            # species list
+            species_list = datafile['species_names'][:]
+            self.species_list = [x.decode("utf-8").strip() for x in species_list]
+            # concentrations
+            self.conc = datafile['num_densities'][:]
+            # concentratio change
+            self.dconc = self.conc[1] - self.conc[0]
+            # mean concentration
+            self.mean_conc = np.trapezoid(self.conc,self.time, axis=0) / self.dt
+            # mean rate of concentration change
+            self.mean_dconc = np.array(self.dconc) / self.dt 
+            # reactions and rates
+            reaction_equations = datafile['reaction_equations'][:]
+            self.reaction_equations = [x.decode("utf-8").replace(' ', '') 
+                for x in reaction_equations]
+            self.rj = datafile['rates'][:]
+            self.delete_zero_reactions()
+            self.invert_negative_rates()
+            # part of rate of reaction j associated with deleted pathways
+            self.rj_del = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+            # part of rate of reaction j associated with error pathways
+            self.rj_err = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+            # molecules of species i produces or destroyed by reaction j
+            self.sij = get_sij(self.species_list, self.reaction_equations)
+            # multiplicity of reaction j in pathway k
+            self.xjk = np.diag(np.ones(len(self.reaction_equations), dtype=int))
+            self.xjk = sparse.csc_matrix(self.xjk)
+            # list of pathways pathways by unique id
+            self.pathway_ids = xjk_to_id_list(self.xjk)
+            # molecules of species i produces or destroyed by pathway k
+            self.mik = sparse_dot(self.sij, self.xjk)
+            # rates of pathways
+            self.fk = self.rj
+            # rate of production of species i by deleted pathways
+            self.pi_del = np.zeros(len(self.species_list), dtype=np.longdouble)
+            # rate of production of species i by error pathways
+            self.pi_err = np.zeros(len(self.species_list), dtype=np.longdouble)
+            # rate of destruction of species i by deleted pathways
+            self.di_del = np.zeros(len(self.species_list), dtype=np.longdouble)
+            # rate of destruction of species i by error pathways
+            self.di_err = np.zeros(len(self.species_list), dtype=np.longdouble)
+            # total rate of production of species i by all pathways
+            self.pi = self.pi_del + np.dot(np.multiply(self.mik, self.mik>0), self.fk)
+            # total rate of destruction of species i by all pathways
+            self.di = self.di_del + np.dot(np.abs(np.multiply(self.mik, self.mik<0)), self.fk)
+            # list of used banching species
+            self.sb_list = []
+            self.sb_order = {}
+            self.ignored_sb = ignored_sb
+            # number of processes to use to construct pathways
+            self.n_processes = n_processes
+            # full list of species including transport species
+            self.transport_species = transport_species
+            # temporary variables to store deleted pathway rates
+            self.rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+            self.pi_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+            self.di_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+            if transport_species:
+                transport_species = [f'{x}_transport' for x in self.species_list]
+                self.full_species_list = self.species_list + transport_species
+                self.full_sij = get_sij(self.full_species_list, self.reaction_equations)
 
-        self.delete_error_reactions = delete_error_reactions
-        if self.delete_error_reactions:
-            self.del_error_reactions()
+            self.delete_error_reactions = delete_error_reactions
+            if self.delete_error_reactions:
+                self.del_error_reactions()
 
 
     def reinit(self):
         '''Re-initializes the chempath object with the input information'''
         self.__init__(
-        reactions_path = self.reactions_path,
-        rates_path = self.rates_path,
-        species_path = self.species_path,
-        conc_path = self.conc_path,
-        time_path = self.time_path,
+        h5py_path=self.h5py_path,
         f_min = self.f_min,
         warnings = self.warnings,
-        dtype = self.dtype,
         transport_species = self.transport_species,
         ignored_sb = self.ignored_sb,
         n_processes = self.n_processes
         )
 
-    def load_pathways_from_files(self, filespath, dtype=np.float128):
+    def load_pathways_from_files(self, filespath, dtype=np.longdouble):
         '''Loads pathway info  saved using the save_pathway_info method
         Arguments:
             filespath(str): path of files to read
             dtype(type): data type of numbers if the files
         '''
-        # part of rate of reaction j deleted pathways
-        self.rj_del = np.fromfile(f'{filespath}/rj_del.dat', dtype=dtype)
         # multiplicity of reaction j in pathway k
         self.xjk = sparse.load_npz(f'{filespath}/sparse_xjk.npz')
         # list of pathways pathways by unique id
         self.pathway_ids = xjk_to_id_list(self.xjk)
         # molecules of species i produces or destroyed by pathway k
         self.mik = sparse_dot(self.sij, self.xjk)
-        # rates of pathways
-        self.fk = np.fromfile(f'{filespath}/fk.dat', dtype=dtype)
-        # rate of production of species i by deleted pathways
-        self.pi_del = np.fromfile(f'{filespath}/pi_del.dat', dtype=dtype)
-        # rate of destruction of species i by deleted pathways
-        self.di_del = np.fromfile(f'{filespath}/di_del.dat', dtype=dtype)
-        # total rate of production of species i by all pathways
-        self.pi = np.fromfile(f'{filespath}/pi.dat', dtype=dtype)
-        # total rate of destruction of species i by all pathways
-        self.di = np.fromfile(f'{filespath}/di.dat', dtype=dtype)
-        # list of used banching species
-        self.sb_list = list(np.loadtxt(f'{filespath}/sb_list.txt', dtype=str,
-            delimiter=','))
-        # list of species not considered as brancing species 
-        self.ignored_sb = list(np.loadtxt(f'{filespath}/ignored_sb.txt',
-            dtype=str, delimiter=','))
+        with h5py.File(f'{filespath}/chempath_info.hdf5', 'r') as datafile:
+            # part of rate of reaction j deleted pathways
+            self.rj_del = datafile['rj_del'][:]
+            # rates of pathways
+            self.fk = datafile['fk'][:]
+            # rate of production of species i by deleted pathways
+            self.pi_del = datafile['pi_del'][:]
+            # rate of destruction of species i by deleted pathways
+            self.di_del = datafile['di_del'][:]
+            # rate of production of species i by error pathways
+            self.pi_err = datafile['pi_err'][:]
+            # rate of destruction of species i by error pathways
+            self.di_err = datafile['di_err'][:]
+            # total rate of production of species i by all pathways
+            self.pi = datafile['pi'][:]
+            # total rate of destruction of species i by all pathways
+            self.di = datafile['di'][:]
+            # list of used banching species
+            self.sb_list = [x.decode("utf-8").strip() 
+                for x in datafile['sb_list'][:]]
+            # list of species not considered as brancing species 
+            self.ignored_sb = [x.decode("utf-8").strip() 
+                for x in datafile['ignored_sb'][:]]
 
         
     def get_sb(self, tau_max=None, min_conc=None):
@@ -227,7 +208,7 @@ class Chempath():
         '''Deletes reactions with a zero rate'''
         delete_idxs = np.where(self.rj == 0)[0]
         self.rj = np.delete(self.rj, delete_idxs)
-        self.reaction_equations = np.delete(self.reaction_equations, delete_idxs)
+        self.reaction_equations = list(np.delete(self.reaction_equations, delete_idxs))
 
     def invert_negative_rates(self):
         '''Inverts reactions with negative rates. We assumed that all rates are
@@ -281,10 +262,10 @@ class Chempath():
         pid_new = []
 
         # variables to store deleted pathway rates
-        rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.float128)
-        pi_del_temp = np.zeros(len(self.species_list), dtype=np.float128)
-        di_del_temp = np.zeros(len(self.species_list), dtype=np.float128)
-        fk_temp = np.zeros(len(self.fk), dtype=np.float128)
+        rj_del_temp = np.zeros(len(self.reaction_equations), dtype=np.longdouble)
+        pi_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+        di_del_temp = np.zeros(len(self.species_list), dtype=np.longdouble)
+        fk_temp = np.zeros(len(self.fk), dtype=np.longdouble)
 
         # calculate new multiplicities so that sb is recycled
         # and calculate rates of new pathways
@@ -626,7 +607,7 @@ class Chempath():
         fk_elem_list = []
         pid_elem_list = []
         delete_idxs = []
-        fk_temp = np.zeros(len(self.fk), dtype=np.float128)
+        fk_temp = np.zeros(len(self.fk), dtype=np.longdouble)
 
         if new_pathways_flag:
             # for each pathway...
@@ -1018,6 +999,8 @@ class Chempath():
         contrib_df['dconc'] = self.dconc[sp_idx]
         contrib_df.sort_values('contribution', ascending=False, inplace=True)
         contrib_df = contrib_df.reset_index(drop=True)
+        contrib_df=contrib_df.astype({'contribution':np.float64, 'rate':np.float64,
+            'total_prod':np.float64})
         return contrib_df        
        
     def check_mass_conservation(self, min_concentration=1.0, atol=1e-3,
@@ -1233,70 +1216,28 @@ class Chempath():
             path(str): path where the files will be saved
         '''
         sparse.save_npz(f'{path}/sparse_xjk', self.xjk)
-        self.fk.tofile(f'{path}/fk.dat')
-        np.float128(self.pi).tofile(f'{path}/pi.dat')
-        np.float128(self.di).tofile(f'{path}/di.dat')
-        np.float128(self.pi_del).tofile(f'{path}/pi_del.dat')
-        np.float128(self.di_del).tofile(f'{path}/di_del.dat')
-        np.float128(self.rj_del).tofile(f'{path}/rj_del.dat')
-        np.savetxt(f'{path}/sb_list.txt', self.sb_list, delimiter=",", fmt="%s")
-        np.savetxt(f'{path}/ignored_sb.txt', self.ignored_sb, delimiter=",", fmt="%s")
-
-
-def read_reactions_file(filepath):
-    '''Reads input reactions file
-    Arguments:
-        filepath(str): path of reaction equations file
-    Returns:
-        reactions (list): list of reactions equation strings      
-    '''
-    reactions =  np.loadtxt(filepath, dtype=str, delimiter=',')
-    reactions = [reaction.replace(' ', '') for reaction in reactions]
-    return reactions
-
-def read_rates(filepath, dtype=np.float128):
-    '''Reads input reactions rates file
-    Arguments:
-        filepath(str): path of reactions rates file
-        dtype (type): number type of reaction rates
-    Returns:
-        rates (numpy array): array of reactions rates      
-    '''
-    rates = np.fromfile(filepath, dtype=dtype)
-    return rates
-     
-def read_conc_file(filepath, n_species, dtype=np.float128):
-    '''Reads input species concentrations file
-    Arguments:
-        filepath(str): path of species concentrations file
-        n_species(int): number of species in the reaction system
-        dtype (type): number type of concentrations
-    Returns:
-        conc (numpy array): array of species concentrations   
-    '''
-    conc = np.fromfile(filepath, dtype=dtype).reshape(2, n_species)
-    return  conc
-
-def read_species_file(filepath):
-    '''Reads input species names file
-    Arguments:
-        filepath(str): path of species names file
-    Returns:
-        species (numpy array): array of species names      
-    '''
-    species =  list(np.loadtxt(filepath, dtype=str, delimiter=','))
-    return species
-
-def read_time_file(filepath, dtype=np.float128):
-    '''Reads input model time file
-    Arguments:
-        filepath(str): path of model time file
-        dtype (type): number type of model time
-    Returns:
-        species (numpy array): array of species names      
-    '''
-    time = np.fromfile(filepath, dtype=dtype)
-    return time
+        h5py_filename = f"{path}/chempath_info.hdf5"
+        with h5py.File(h5py_filename, "w") as datafile:
+            datafile.create_dataset("fk", self.fk.shape, dtype='f16', 
+                data=self.fk)
+            datafile.create_dataset("pi", self.pi.shape, dtype='f16', 
+                data=self.pi)
+            datafile.create_dataset("di", self.di.shape, dtype='f16', 
+                data=self.di)
+            datafile.create_dataset("pi_del", self.pi_del.shape, dtype='f16', 
+                data=self.pi_del)
+            datafile.create_dataset("di_del", self.di_del.shape, dtype='f16', 
+                data=self.di_del)
+            datafile.create_dataset("pi_err", self.pi_err.shape, dtype='f16', 
+                data=self.pi_err)
+            datafile.create_dataset("di_err", self.di_err.shape, dtype='f16', 
+                data=self.di_err)
+            datafile.create_dataset("rj_del", self.rj_del.shape, dtype='f16', 
+                data=self.rj_del)
+            datafile.create_dataset("sb_list", [len(self.sb_list)], 
+                    dtype=h5py.string_dtype(), data=self.sb_list)
+            datafile.create_dataset("ignored_sb", [len(self.ignored_sb)], 
+                    dtype=h5py.string_dtype(), data=self.ignored_sb)
 
 def solve_system_eq(a,b):
     ''' Solves system of equations ax=b
@@ -1379,28 +1320,6 @@ def xjk_to_id_list(xjk):
     for i in range(xjk.shape[1]):
         id_list.append(get_pathway_id(xjk[:, i]))
     return np.array(id_list)
-
-# def delete_duplicated_pathways(pathway_ids,fk, xjk):
-#     '''Deletes duplicated pathways'''
-#     u, c = np.unique(pathway_ids, return_counts=True)
-#     duplicates = u[c>1]
-#     if len(duplicates) > 0:
-#         df = pd.DataFrame({'pid': pathway_ids, 'fk': fk,
-#             'idx': np.arange(0, len(fk))})
-#         df.fk = df.fk.astype('float128') 
-#         df1 = df.groupby('pid').sum().reset_index()[['pid', 'fk']]
-#         df2 = df[['pid', 'idx']].drop_duplicates(subset='pid', keep='first')
-#         df = pd.merge(df1, df2, on='pid', how='inner')
-
-#         idxs = df.idx.to_numpy()
-#         pids = df.pid.to_numpy()
-#         fk = df.fk.to_numpy().astype(np.float128)
-        
-#         xjk = xjk[:, idxs]
-#         pathway_ids = pids
-#         fk = fk
-#     return pathway_ids, fk, xjk
-
 
 def format_react_txt(reacts, prods):
     '''Gets a reaction string in a txt format

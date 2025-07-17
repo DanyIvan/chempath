@@ -3,6 +3,7 @@ import json
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from rates import three_body_rate, weird_rates
+import h5py
 
 
 class PhotochemBoxModel():
@@ -191,47 +192,50 @@ class PhotochemBoxModel():
         
         # for each time idx
         for i, idx in enumerate(idxs):
-            
-            # save model time
-            np.array([time[idx], time[idx+1]]).\
-                tofile(f'{outpath}/time_{i}.dat') 
-              
-            # save species concentrations
-            np.array([conc[:, idx], conc[:, idx+1]]).\
-                tofile(f'{outpath}/num_densities_{i}.dat')
-            
-            dt = time[idx+1] - time[idx]
-            dn = conc[:, idx+1] - conc[:, idx]
-            dndt = dn/dt
+            h5py_filename = f"chempath_input/box_model_output_{i}.hdf5"
+            with h5py.File(h5py_filename, "w") as datafile:
+    
+                # save model time
+                model_time = np.array([time[idx], time[idx+1]])
+                datafile.create_dataset("model_time", model_time.shape, dtype='f16', 
+                    data=model_time)
+                
+                # save species concentrations
+                num_densities = np.array([conc[:, idx], conc[:, idx+1]])
+                datafile.create_dataset("num_densities", num_densities.shape, 
+                    dtype='f16', data=num_densities)
+                
+                dt = time[idx+1] - time[idx]
+                dn = conc[:, idx+1] - conc[:, idx]
+                dndt = dn/dt
 
-            # get mean reaction rate and save it
-            mean_reaction_rate = (rates[:, idx+1] + rates[:, idx])/2
-            # mean_reaction_rate.tofile(f'{outpath}/rates_{i}.dat')
-            # get reactions
-            reactions = ['+'.join(x['reactants']) + '=' +\
-                '+'.join(x['products']) for x in self.reactions_dict]
-            
-            chemprod = np.dot(self.s_ij, mean_reaction_rate)
+                # get mean reaction rate and save it
+                mean_reaction_rate = (rates[:, idx+1] + rates[:, idx])/2
+                # get reactions
+                reactions = ['+'.join(x['reactants']) + '=' +\
+                    '+'.join(x['products']) for x in self.reactions_dict]
+                
+                chemprod = np.dot(self.s_ij, mean_reaction_rate)
 
-            # error rate
-            error_rates = dndt - chemprod
-            err_reactions = [f'{sp}_err = {sp}' for 
-                sp in self.species_list]
-            
-            # concatenate all reaction and rates
-            all_reactions = np.concatenate([reactions, err_reactions])
-            all_rates = np.concatenate([mean_reaction_rate, error_rates])
-            
-            # save rates
-            all_rates.tofile(f'{outpath}/rates_{i}.dat')
+                # error rate
+                error_rates = dndt - chemprod
+                err_reactions = [f'{sp}_err={sp}' for 
+                    sp in self.species_list]
+                
+                # concatenate all reaction and rates
+                all_reactions = reactions + err_reactions
+                all_rates = np.concatenate([mean_reaction_rate, error_rates])
+                
+                # save rates
+                datafile.create_dataset("rates", all_rates.shape, 
+                    dtype='f16', data=all_rates)
 
-            # save reaction equations and species names
-            if i == 0:
-                np.savetxt(f'{outpath}/reactions.txt', all_reactions,
-                    fmt="%s", delimiter=',')
-                np.savetxt(f'{outpath}/species.txt', self.species_list,
-                    fmt="%s", delimiter=',')      
-
+                # save reaction equations and species names
+                datafile.create_dataset("reaction_equations", len(all_reactions), 
+                    dtype=h5py.string_dtype(), data=all_reactions)
+                datafile.create_dataset("species_names", (len(self.species_list)), 
+                    dtype=h5py.string_dtype(), data=self.species_list)
+   
     def print_reactions(self):
         for reaction in self.reactions_dict:
             print(' + '.join(reaction['reactants']) + ' --> ' +\
