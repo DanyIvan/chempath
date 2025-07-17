@@ -1,4 +1,0 @@
-O3 + hv = O + O2
-O2 + hv = O + O
-O + O2 + M = O3
-O + O3 = O2 + O2
