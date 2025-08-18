@@ -49,3 +49,5 @@ If there are no errors, you can go ahead and use Chempath.
 # References
 
 Lehmann (2004): An Algorithm for the Determination of All Significant Pathways in Chemical Reaction Systems, Journal of Atmospheric Chemistry, 47, 45–78.
+
+Garduno Ruiz (2025): Chempath 1.0: an open-source pathway analysis program for photochemical models. [https://doi.org/10.5194/gmd-18-4433-2025](https://doi.org/10.5194/gmd-18-4433-2025)
