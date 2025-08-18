@@ -190,7 +190,7 @@ def save_mixing_ratios(path):
 
 # run model for 5 my
 yrs=60*60*24*365
-run_model(OUTPUT_FOLDER, tf=5*yrs*1e6, t_save=0.1*yrs*1e6)
+run_model(OUTPUT_FOLDER, tf=2*yrs*1e6)
 
 # save number densities as a csv file
 save_number_densities(OUTPUT_FOLDER)
