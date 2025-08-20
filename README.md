@@ -7,7 +7,9 @@
 
 
 
-Chempath is a pathway analysis program that automatically builds the the most important pathways of a reaction system. This algorithm was originally developed by Lehmann (2004). Chempath is an open-source, python implementation of this algorithm
+Chempath is a pathway analysis program that automatically builds the the most important pathways of a reaction system. This algorithm was originally developed by Lehmann (2004). Chempath is an open-source, python implementation of this algorithm. 
+
+Chempath is described in this paper: [https://doi.org/10.5194/gmd-18-4433-2025](https://doi.org/10.5194/gmd-18-4433-2025)
 
 
 ## How to use Chempath
