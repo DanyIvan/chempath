@@ -3,6 +3,9 @@
 examples/box_model_pathways/chempath_input/*
 examples/box_model_pathways/*.pdf
 examples/photochem_modern_earth/*.pdf
+examples/photochem_modern_earth/chempath_input/*
+examples/photochem_modern_earth/pathways/*
+examples/photochem_modern_earth/photochem_output/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,4 +1,7 @@
-from chempath6 import Chempath
+import sys
+sys.path.append('../../')
+
+from chempath import Chempath
 import pandas as pd
 import pathlib
 from multiprocessing import Pool
@@ -68,7 +71,7 @@ def get_pathways_contributions(alt_idx, time_idx):
     loss_dfs['time'] = loss_dfs['time']
 
     # save contributions
-    outfolder = f'{INPUT_PATH}/{OUTPUT_FOLDER}/{time_idx}/{alt_idx}'
+    outfolder = f'{OUTPUT_FOLDER}/{time_idx}/{alt_idx}'
     pathlib.Path(outfolder).mkdir(exist_ok=True, parents=True)
     prod_dfs.to_csv(f'{outfolder}/prod_pathways.csv', index=0,
         compression='gzip')
@@ -92,14 +95,14 @@ def get_all_contrib_dfs(time_idx):
     prod = pd.concat(prod)
     loss = pd.concat(loss)
 
-    prod.to_csv(f'{INPUT_PATH}/{OUTPUT_FOLDER}/{time_idx}/prod_pathways_profiles.csv',
+    prod.to_csv(f'{OUTPUT_FOLDER}/{time_idx}/prod_pathways_profiles.csv',
         compression='gzip')
-    loss.to_csv(f'{INPUT_PATH}/{OUTPUT_FOLDER}/{time_idx}/loss_pathways_profiles.csv',
+    loss.to_csv(f'{OUTPUT_FOLDER}/{time_idx}/loss_pathways_profiles.csv',
         compression='gzip')
 
 
 cwd = os.getcwd()
-folder = 'pathways'
+folder = 'chempath_input/'
 
 def get_idxs(name):
     i1 = name.rfind('_') + 1
@@ -110,5 +113,7 @@ files = glob.glob(folder+'/0/photochem_output*')
 time_idxs = [get_idxs(x) for x in files]
 time_idxs = np.sort(time_idxs)[::-1]
 
+print(time_idxs)
 for i in time_idxs:
+    print(i)
     get_all_contrib_dfs(i)
